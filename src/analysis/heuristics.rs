@@ -43,6 +43,16 @@ pub struct HeuristicFeatures {
     pub has_op_return: bool,
     pub reveals_inscription: bool,
     pub carries_raw_data: bool,
+    /// Any taproot input carries a BIP341 annex.
+    pub has_taproot_annex: bool,
+    /// Any Schnorr sig uses compact SIGHASH_DEFAULT (64-byte).
+    pub has_schnorr_default: bool,
+    /// Any Schnorr sig uses explicit SIGHASH_ALL (65-byte `…01`).
+    pub has_schnorr_explicit_all: bool,
+    /// Creates a P2A / ephemeral-anchor output.
+    pub has_p2a_output: bool,
+    /// Spends a P2A prevout (anchor cleanup).
+    pub spends_p2a: bool,
 }
 
 pub fn extract(
@@ -114,6 +124,8 @@ pub fn extract(
     let input_types: Vec<RawInputType> = rawtx.inputs.iter().map(|i| i.input_type).collect();
 
     let (uih1, uih2) = uih_flags(prevouts, &payment_outputs);
+    let spends_p2a = prevout_types.iter().any(|t| *t == RawOutputType::P2a)
+        || input_types.iter().any(|t| *t == RawInputType::P2a);
 
     HeuristicFeatures {
         equal_amount_outputs,
@@ -136,6 +148,12 @@ pub fn extract(
         has_op_return: rawtx.structure.has_opreturn_output,
         reveals_inscription: rawtx.reveals_inscription,
         carries_raw_data: rawtx.carries_raw_data,
+        has_taproot_annex: fingerprints.transaction.has_taproot_annex,
+        has_schnorr_default: fingerprints.transaction.has_schnorr_default,
+        has_schnorr_explicit_all: fingerprints.transaction.has_schnorr_explicit_all,
+        has_p2a_output: fingerprints.transaction.has_p2a_output
+            || rawtx.structure.has_p2a_output,
+        spends_p2a,
     }
 }
 

@@ -313,6 +313,66 @@ impl fmt::Display for SighashType {
     }
 }
 
+/// How a Schnorr signature encodes its sighash (BIP341).
+///
+/// rawtx-rs maps 64-byte sigs to flag `0x01`; we recover the wire encoding here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum SchnorrSighashForm {
+    /// 64-byte signature → implicit SIGHASH_DEFAULT.
+    Default = 0,
+    /// 65-byte signature with explicit SIGHASH_ALL (`0x01`).
+    ExplicitAll = 1,
+    /// 65-byte signature with some other explicit sighash flag.
+    ExplicitOther = 2,
+}
+
+serialize_as_u8!(SchnorrSighashForm);
+
+impl SchnorrSighashForm {
+    pub fn from_sig_bytes(sig: &[u8]) -> Option<Self> {
+        match sig.len() {
+            64 => Some(Self::Default),
+            65 => match sig[64] {
+                0x01 => Some(Self::ExplicitAll),
+                _ => Some(Self::ExplicitOther),
+            },
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for SchnorrSighashForm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Default => "default",
+            Self::ExplicitAll => "explicit_all",
+            Self::ExplicitOther => "explicit_other",
+        })
+    }
+}
+
+/// Taproot spend path for an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum TaprootSpendPath {
+    None = 0,
+    Key = 1,
+    Script = 2,
+}
+
+serialize_as_u8!(TaprootSpendPath);
+
+impl fmt::Display for TaprootSpendPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Key => "key",
+            Self::Script => "script",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum SigAlgo {

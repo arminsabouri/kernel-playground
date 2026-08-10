@@ -48,6 +48,8 @@ pub struct StructureFlags {
     pub is_signaling_explicit_rbf: bool,
     pub is_bip69_compliant: bool,
     pub has_opreturn_output: bool,
+    /// Creates at least one P2A (ephemeral anchor) output.
+    pub has_p2a_output: bool,
     /// rawtx-rs equal-output coinjoin heuristic (≥⅓ of outputs share a value, count > 2).
     pub potentially_coinjoin: bool,
     /// rawtx-rs consolidation heuristic (≥10 inputs, ≤2 outputs).
@@ -121,6 +123,10 @@ pub fn extract(tx: &Transaction) -> Result<RawTxFeatures, String> {
         .collect();
     let reveals_inscription = inscription_flags.iter().any(|&v| v);
     let has_opreturn = info.has_opreturn_output();
+    let has_p2a_output = info
+        .output_infos
+        .iter()
+        .any(|o| matches!(o.out_type, rawtx_rs::output::OutputType::P2a));
 
     let inputs = info
         .input_infos
@@ -138,17 +144,32 @@ pub fn extract(tx: &Transaction) -> Result<RawTxFeatures, String> {
             signatures: i
                 .signature_info
                 .iter()
-                .map(|s| SignatureCharacteristics {
-                    signature_type: match s.signature {
-                        SignatureType::Ecdsa(_) => SigAlgo::Ecdsa,
-                        SignatureType::Schnorr(_) => SigAlgo::Schnorr,
-                    },
-                    der_encoding: DerEncoding::from(&s.der_encoded),
-                    sighash: SighashType::from_flag(s.sig_hash),
-                    sighash_flag: s.sig_hash,
-                    length: s.length,
-                    low_r: s.low_r(),
-                    low_s: s.low_s(),
+                .map(|s| {
+                    // rawtx-rs reports 64-byte Schnorr sigs as sighash 0x01 (ALL).
+                    // BIP341 treats that encoding as SIGHASH_DEFAULT (0x00).
+                    let (sighash, sighash_flag) = match &s.signature {
+                        SignatureType::Schnorr(_) if s.length == 64 => {
+                            (SighashType::Default, 0x00)
+                        }
+                        SignatureType::Schnorr(_) => {
+                            (SighashType::from_flag(s.sig_hash), s.sig_hash)
+                        }
+                        SignatureType::Ecdsa(_) => {
+                            (SighashType::from_flag(s.sig_hash), s.sig_hash)
+                        }
+                    };
+                    SignatureCharacteristics {
+                        signature_type: match s.signature {
+                            SignatureType::Ecdsa(_) => SigAlgo::Ecdsa,
+                            SignatureType::Schnorr(_) => SigAlgo::Schnorr,
+                        },
+                        der_encoding: DerEncoding::from(&s.der_encoded),
+                        sighash,
+                        sighash_flag,
+                        length: s.length,
+                        low_r: s.low_r(),
+                        low_s: s.low_s(),
+                    }
                 })
                 .collect(),
             pubkeys: i.pubkey_stats.iter().map(pubkey_info).collect(),
@@ -201,6 +222,7 @@ pub fn extract(tx: &Transaction) -> Result<RawTxFeatures, String> {
             is_signaling_explicit_rbf: info.is_signaling_explicit_rbf_replicability(),
             is_bip69_compliant: info.is_bip69_compliant(),
             has_opreturn_output: has_opreturn,
+            has_p2a_output,
             potentially_coinjoin: info.potentially_coinjoin(),
             potentially_consolidation: info.potentially_consolidation(),
             output_value_sum_sat: info.output_value_sum().to_sat(),
