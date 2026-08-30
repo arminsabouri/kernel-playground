@@ -7,22 +7,24 @@
 mod change;
 mod fingerprints;
 mod heuristics;
+pub mod normalize;
 mod rawtx;
 pub mod types;
 
 use bitcoin::{Amount, Transaction, TxOut};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub use change::ChangeAnalysis;
 pub use fingerprints::FingerprintFeatures;
 pub use heuristics::HeuristicFeatures;
+pub use normalize::{normalize_tx, schema};
 pub use rawtx::RawTxFeatures;
 
 /// Everything we currently extract about a single confirmed transaction.
 ///
 /// Fields are kept close to their source heuristics so they can later be
 /// normalized / one-hot encoded independently.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct TxAnalysis {
     pub txid: String,
     pub block_height: i32,
@@ -57,7 +59,8 @@ pub fn analyze_tx(
 ) -> Result<TxAnalysis, String> {
     let fingerprints = fingerprints::extract(tx, prevouts);
     let rawtx = rawtx::extract(tx)?;
-    let heuristics = heuristics::extract(tx, prevouts, &fingerprints, &rawtx, block_ctx);
+    let heuristics =
+        heuristics::extract(tx, prevouts, &fingerprints, &rawtx, block_ctx, block_height);
     let change = change::analyze(tx, prevouts, &fingerprints);
 
     Ok(TxAnalysis {

@@ -1,29 +1,26 @@
 //! Change-output assignment heuristics.
 //!
-//! Several weak signals are combined. When none fire, `no_change_apparent` is set —
-//! useful later for distribution stats of "payment-only" shaped transactions.
+//! Several weak signals are combined. When none fire, `no_change_apparent`
 
 use bitcoin::{Transaction, TxOut};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::fingerprints::FingerprintFeatures;
 use super::types::{ChangeHeuristic, RawOutputType};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeCandidate {
     pub vout: usize,
     pub value_sat: u64,
     pub heuristics: Vec<ChangeHeuristic>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeAnalysis {
     /// Best-effort change vouts. Empty when nothing looks like change.
     pub candidates: Vec<ChangeCandidate>,
     /// True when we could not assign change with any of the heuristics below.
     pub no_change_apparent: bool,
-    pub address_reuse: bool,
-    pub uih1_optimal_change: bool,
 }
 
 pub fn analyze(
@@ -35,8 +32,6 @@ pub fn analyze(
         return ChangeAnalysis {
             candidates: Vec::new(),
             no_change_apparent: true,
-            address_reuse: false,
-            uih1_optimal_change: false,
         };
     }
 
@@ -52,16 +47,13 @@ pub fn analyze(
         return ChangeAnalysis {
             candidates: Vec::new(),
             no_change_apparent: true,
-            address_reuse: fingerprints.transaction.address_reuse,
-            uih1_optimal_change: false,
         };
     }
 
     let mut scores: Vec<(usize, Vec<ChangeHeuristic>)> =
         payment.iter().map(|(i, _)| (*i, Vec::new())).collect();
 
-    let address_reuse = fingerprints.transaction.address_reuse;
-    if address_reuse {
+    if fingerprints.transaction.address_reuse {
         let input_scripts: std::collections::HashSet<Vec<u8>> = prevouts
             .iter()
             .map(|p| p.script_pubkey.as_bytes().to_vec())
@@ -73,20 +65,13 @@ pub fn analyze(
         }
     }
 
-    let uih1_optimal_change = if let Some(min_in) = prevouts.iter().map(|p| p.value).min() {
+    if let Some(min_in) = prevouts.iter().map(|p| p.value).min() {
         if let Some((vout, out)) = payment.iter().min_by_key(|(_, o)| o.value) {
             if out.value < min_in {
                 push_heuristic(&mut scores, *vout, ChangeHeuristic::OptimalChange);
-                true
-            } else {
-                false
             }
-        } else {
-            false
         }
-    } else {
-        false
-    };
+    }
 
     // Homogeneous input script type → matching unique output may be change.
     let input_types: Vec<RawOutputType> = fingerprints.inputs.iter().map(|i| i.input_type).collect();
@@ -118,8 +103,6 @@ pub fn analyze(
     ChangeAnalysis {
         candidates,
         no_change_apparent,
-        address_reuse,
-        uih1_optimal_change,
     }
 }
 

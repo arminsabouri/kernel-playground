@@ -1,27 +1,40 @@
 //! Categorical feature types for later integer / one-hot normalization.
 //!
 //! Every enum here:
-//! - has a stable `#[repr(u8)]` discriminant
-//! - serializes as that integer in JSON
+//! - has a stable `#[repr(u8)]` discriminant (wire / storage code)
+//! - serializes/deserializes as that integer in JSON
 //! - implements [`Display`] for human-readable labels
+//! - exposes [`Categorical::all`] for dense one-hot / multi-hot columns
 
 use std::fmt;
 
-use serde::{Serialize, Serializer};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 
-/// Serialize an enum as its `u8` discriminant.
-macro_rules! serialize_as_u8 {
-    ($t:ty) => {
-        impl Serialize for $t {
-            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                serializer.serialize_u8(*self as u8)
-            }
-        }
-    };
+/// Enums that can be expanded into a fixed one-hot / multi-hot block.
+pub trait Categorical: Copy + Eq + 'static {
+    fn all() -> &'static [Self];
+
+    fn dense_id(self) -> usize {
+        Self::all()
+            .iter()
+            .position(|&x| x == self)
+            .expect("categorical variant missing from all()")
+    }
+
+    fn cardinality() -> usize {
+        Self::all().len()
+    }
+
+    fn label(self) -> String
+    where
+        Self: fmt::Display,
+    {
+        self.to_string()
+    }
 }
 
 /// Input ordering fingerprints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum InputSorting {
     Single = 0,
@@ -32,7 +45,18 @@ pub enum InputSorting {
     Unknown = 5,
 }
 
-serialize_as_u8!(InputSorting);
+impl Categorical for InputSorting {
+    fn all() -> &'static [Self] {
+        &[
+            Self::Single,
+            Self::Ascending,
+            Self::Descending,
+            Self::Bip69,
+            Self::Historical,
+            Self::Unknown,
+        ]
+    }
+}
 
 impl From<tx_indexer_fingerprints::types::InputSortingType> for InputSorting {
     fn from(t: tx_indexer_fingerprints::types::InputSortingType) -> Self {
@@ -61,7 +85,7 @@ impl fmt::Display for InputSorting {
 }
 
 /// Coarse output-count structure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum OutputStructure {
     Single = 0,
@@ -70,7 +94,6 @@ pub enum OutputStructure {
     Unknown = 3,
 }
 
-serialize_as_u8!(OutputStructure);
 
 impl From<tx_indexer_fingerprints::types::OutputStructureType> for OutputStructure {
     fn from(t: tx_indexer_fingerprints::types::OutputStructureType) -> Self {
@@ -95,7 +118,7 @@ impl fmt::Display for OutputStructure {
 }
 
 /// Input spend type from rawtx-rs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum RawInputType {
     P2pk = 0,
@@ -117,7 +140,6 @@ pub enum RawInputType {
     Unknown = 16,
 }
 
-serialize_as_u8!(RawInputType);
 
 impl From<rawtx_rs::input::InputType> for RawInputType {
     fn from(t: rawtx_rs::input::InputType) -> Self {
@@ -168,7 +190,7 @@ impl fmt::Display for RawInputType {
 }
 
 /// Output type from rawtx-rs, with OP_RETURN flavors flattened for a single int column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum RawOutputType {
     P2pk = 0,
@@ -195,7 +217,6 @@ pub enum RawOutputType {
     OpReturnRunestone = 32,
 }
 
-serialize_as_u8!(RawOutputType);
 
 impl From<rawtx_rs::output::OutputType> for RawOutputType {
     fn from(t: rawtx_rs::output::OutputType) -> Self {
@@ -268,7 +289,7 @@ impl fmt::Display for RawOutputType {
 
 /// Sighash type. Discriminants match the on-wire flag byte where possible;
 /// [`Self::Unknown`] covers anything else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum SighashType {
     Default = 0x00,
@@ -281,7 +302,6 @@ pub enum SighashType {
     Unknown = 0xff,
 }
 
-serialize_as_u8!(SighashType);
 
 impl SighashType {
     pub fn from_flag(flag: u8) -> Self {
@@ -316,7 +336,7 @@ impl fmt::Display for SighashType {
 /// How a Schnorr signature encodes its sighash (BIP341).
 ///
 /// rawtx-rs maps 64-byte sigs to flag `0x01`; we recover the wire encoding here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum SchnorrSighashForm {
     /// 64-byte signature → implicit SIGHASH_DEFAULT.
@@ -327,7 +347,6 @@ pub enum SchnorrSighashForm {
     ExplicitOther = 2,
 }
 
-serialize_as_u8!(SchnorrSighashForm);
 
 impl SchnorrSighashForm {
     pub fn from_sig_bytes(sig: &[u8]) -> Option<Self> {
@@ -353,7 +372,7 @@ impl fmt::Display for SchnorrSighashForm {
 }
 
 /// Taproot spend path for an input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum TaprootSpendPath {
     None = 0,
@@ -361,7 +380,6 @@ pub enum TaprootSpendPath {
     Script = 2,
 }
 
-serialize_as_u8!(TaprootSpendPath);
 
 impl fmt::Display for TaprootSpendPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -373,14 +391,13 @@ impl fmt::Display for TaprootSpendPath {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum SigAlgo {
     Ecdsa = 0,
     Schnorr = 1,
 }
 
-serialize_as_u8!(SigAlgo);
 
 impl fmt::Display for SigAlgo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -391,14 +408,13 @@ impl fmt::Display for SigAlgo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum PubkeyAlgo {
     Ecdsa = 0,
     Schnorr = 1,
 }
 
-serialize_as_u8!(PubkeyAlgo);
 
 impl From<rawtx_rs::script::PubkeyType> for PubkeyAlgo {
     fn from(t: rawtx_rs::script::PubkeyType) -> Self {
@@ -418,7 +434,7 @@ impl fmt::Display for PubkeyAlgo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum DerEncoding {
     NotApplicable = 0,
@@ -439,7 +455,6 @@ pub enum DerEncoding {
     NullByteAtSValueStart = 15,
 }
 
-serialize_as_u8!(DerEncoding);
 
 impl From<&rawtx_rs::script::DEREncoding> for DerEncoding {
     fn from(d: &rawtx_rs::script::DEREncoding) -> Self {
@@ -488,7 +503,7 @@ impl fmt::Display for DerEncoding {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum CpfpRole {
     None = 0,
@@ -497,7 +512,6 @@ pub enum CpfpRole {
     Both = 3,
 }
 
-serialize_as_u8!(CpfpRole);
 
 impl fmt::Display for CpfpRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -510,7 +524,7 @@ impl fmt::Display for CpfpRole {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum ChangeHeuristic {
     AddressReuse = 0,
@@ -518,7 +532,6 @@ pub enum ChangeHeuristic {
     ScriptTypeMatch = 2,
 }
 
-serialize_as_u8!(ChangeHeuristic);
 
 impl fmt::Display for ChangeHeuristic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -527,5 +540,246 @@ impl fmt::Display for ChangeHeuristic {
             Self::OptimalChange => "optimal_change",
             Self::ScriptTypeMatch => "script_type_match",
         })
+    }
+}
+
+/// BIP68 / BIP125 shape of an input's nSequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum SequenceShape {
+    /// `0xffffffff` — final; does not opt into nLockTime or RBF.
+    Final = 0,
+    /// `0xfffffffe` — enables nLockTime, does not signal BIP125 RBF.
+    LocktimeNoRbf = 1,
+    /// `0xfffffffd` — typical explicit BIP125 RBF (Core).
+    Rbf = 2,
+    /// Bit 31 clear, type flag clear — BIP68 relative locktime in blocks.
+    RelativeBlocks = 3,
+    /// Bit 31 clear, type flag set — BIP68 relative locktime in 512s units.
+    RelativeTime = 4,
+    /// Any other nSequence (unusual RBF-capable values, etc.).
+    Other = 5,
+}
+
+
+impl SequenceShape {
+    const DISABLE_FLAG: u32 = 1 << 31;
+    const TYPE_FLAG: u32 = 1 << 22;
+
+    pub fn from_nsequence(n: u32) -> Self {
+        match n {
+            0xffff_ffff => Self::Final,
+            0xffff_fffe => Self::LocktimeNoRbf,
+            0xffff_fffd => Self::Rbf,
+            n if n & Self::DISABLE_FLAG != 0 => Self::Other,
+            n if n & Self::TYPE_FLAG != 0 => Self::RelativeTime,
+            _ => Self::RelativeBlocks,
+        }
+    }
+}
+
+impl fmt::Display for SequenceShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Final => "final",
+            Self::LocktimeNoRbf => "locktime_no_rbf",
+            Self::Rbf => "rbf",
+            Self::RelativeBlocks => "relative_blocks",
+            Self::RelativeTime => "relative_time",
+            Self::Other => "other",
+        })
+    }
+}
+
+/// nLockTime shape relative to the confirming block.
+///
+/// Height-delta bins follow common anti-fee-sniping practice (Core/Electrum often
+/// use tip or tip−1; deltas ≥100 are weak/odd for that heuristic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum LocktimeShape {
+    /// nLockTime = 0.
+    None = 0,
+    /// Height-based, locktime == confirming height.
+    HeightExact = 1,
+    /// Height-based, confirming_height − locktime == 1.
+    HeightDelta1 = 2,
+    /// Height-based, delta in 2..=9.
+    HeightDelta2To9 = 3,
+    /// Height-based, delta in 10..=99.
+    HeightDelta10To99 = 4,
+    /// Height-based, delta ≥ 100 (weak anti-fee-snipe / stale).
+    HeightDelta100Plus = 5,
+    /// Height-based, but locktime > confirming height (should not confirm).
+    HeightFuture = 6,
+    /// Unix-timestamp locktime (≥ 500_000_000).
+    Timestamp = 7,
+}
+
+
+impl LocktimeShape {
+    const HEIGHT_THRESHOLD: u32 = 500_000_000;
+
+    pub fn from_locktime(locktime: u32, block_height: i32) -> Self {
+        if locktime == 0 {
+            return Self::None;
+        }
+        if locktime >= Self::HEIGHT_THRESHOLD {
+            return Self::Timestamp;
+        }
+
+        let height = block_height.max(0) as u32;
+        if locktime > height {
+            return Self::HeightFuture;
+        }
+
+        match height - locktime {
+            0 => Self::HeightExact,
+            1 => Self::HeightDelta1,
+            2..=9 => Self::HeightDelta2To9,
+            10..=99 => Self::HeightDelta10To99,
+            _ => Self::HeightDelta100Plus,
+        }
+    }
+}
+
+impl fmt::Display for LocktimeShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::HeightExact => "height_exact",
+            Self::HeightDelta1 => "height_delta_1",
+            Self::HeightDelta2To9 => "height_delta_2_9",
+            Self::HeightDelta10To99 => "height_delta_10_99",
+            Self::HeightDelta100Plus => "height_delta_100_plus",
+            Self::HeightFuture => "height_future",
+            Self::Timestamp => "timestamp",
+        })
+    }
+}
+
+impl Categorical for OutputStructure {
+    fn all() -> &'static [Self] {
+        &[Self::Single, Self::Double, Self::Multi, Self::Unknown]
+    }
+}
+
+impl Categorical for RawInputType {
+    fn all() -> &'static [Self] {
+        &[
+            Self::P2pk,
+            Self::P2pkLaxDer,
+            Self::P2pkh,
+            Self::P2pkhLaxDer,
+            Self::P2shP2wpkh,
+            Self::P2wpkh,
+            Self::P2ms,
+            Self::P2msLaxDer,
+            Self::P2sh,
+            Self::P2shP2wsh,
+            Self::P2wsh,
+            Self::P2trkp,
+            Self::P2trsp,
+            Self::P2a,
+            Self::Coinbase,
+            Self::CoinbaseWitness,
+            Self::Unknown,
+        ]
+    }
+}
+
+impl Categorical for RawOutputType {
+    fn all() -> &'static [Self] {
+        &[
+            Self::P2pk,
+            Self::P2pkh,
+            Self::P2wpkhV0,
+            Self::P2ms,
+            Self::P2sh,
+            Self::P2wshV0,
+            Self::P2tr,
+            Self::P2a,
+            Self::Unknown,
+            Self::OpReturn,
+            Self::OpReturnWitnessCommitment,
+            Self::OpReturnOmni,
+            Self::OpReturnStacksBlockCommit,
+            Self::OpReturnLen1Byte,
+            Self::OpReturnLen20Byte,
+            Self::OpReturnLen80Byte,
+            Self::OpReturnBip47PaymentCode,
+            Self::OpReturnRskBlock,
+            Self::OpReturnCoreDao,
+            Self::OpReturnExSat,
+            Self::OpReturnHathorNetwork,
+            Self::OpReturnRunestone,
+        ]
+    }
+}
+
+impl Categorical for SighashType {
+    fn all() -> &'static [Self] {
+        &[
+            Self::Default,
+            Self::All,
+            Self::None,
+            Self::Single,
+            Self::AllAnyoneCanPay,
+            Self::NoneAnyoneCanPay,
+            Self::SingleAnyoneCanPay,
+            Self::Unknown,
+        ]
+    }
+}
+
+impl Categorical for SchnorrSighashForm {
+    fn all() -> &'static [Self] {
+        &[Self::Default, Self::ExplicitAll, Self::ExplicitOther]
+    }
+}
+
+impl Categorical for TaprootSpendPath {
+    fn all() -> &'static [Self] {
+        &[Self::None, Self::Key, Self::Script]
+    }
+}
+
+impl Categorical for CpfpRole {
+    fn all() -> &'static [Self] {
+        &[Self::None, Self::Parent, Self::Child, Self::Both]
+    }
+}
+
+impl Categorical for ChangeHeuristic {
+    fn all() -> &'static [Self] {
+        &[Self::AddressReuse, Self::OptimalChange, Self::ScriptTypeMatch]
+    }
+}
+
+impl Categorical for SequenceShape {
+    fn all() -> &'static [Self] {
+        &[
+            Self::Final,
+            Self::LocktimeNoRbf,
+            Self::Rbf,
+            Self::RelativeBlocks,
+            Self::RelativeTime,
+            Self::Other,
+        ]
+    }
+}
+
+impl Categorical for LocktimeShape {
+    fn all() -> &'static [Self] {
+        &[
+            Self::None,
+            Self::HeightExact,
+            Self::HeightDelta1,
+            Self::HeightDelta2To9,
+            Self::HeightDelta10To99,
+            Self::HeightDelta100Plus,
+            Self::HeightFuture,
+            Self::Timestamp,
+        ]
     }
 }

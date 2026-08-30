@@ -1,15 +1,21 @@
 mod analysis;
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use analysis::{analyze_tx, bitcoin_tx_from_bytes, prevouts_from_kernel_coins, BlockTxContext};
+use analysis::{
+    analyze_tx, bitcoin_tx_from_bytes, normalize_tx, prevouts_from_kernel_coins, schema,
+    BlockTxContext, TxAnalysis,
+};
 use bitcoinkernel::{
     prelude::*, BlockTreeEntry, ChainType, ChainstateManager, ChainstateManagerBuilder, Context,
     ContextBuilder,
 };
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliChainType {
@@ -30,31 +36,56 @@ impl From<CliChainType> for ChainType {
     }
 }
 
-/// Walk blocks from tip backwards and dump per-tx fingerprint / heuristic features as NDJSON.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum NormalizeFormat {
+    /// One JSON object per line: metadata + `x` feature vector.
+    Ndjson,
+    /// CSV with a header row matching the feature schema (metadata columns first).
+    Csv,
+}
+
+/// Bitcoin tx fingerprint scanner and feature normalizer.
 #[derive(Debug, Parser)]
 #[command(name = "kernel-playground", version, about)]
-struct Args {
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Walk blocks from tip and emit raw per-tx analysis as NDJSON.
+    Scan(ScanArgs),
+    /// Read raw analysis NDJSON and emit a normalized numeric feature matrix.
+    Normalize(NormalizeArgs),
+    /// Print the normalized feature column schema as JSON.
+    Schema,
+}
+
+#[derive(Debug, Parser)]
+struct ScanArgs {
     /// Path to a Bitcoin Core data directory readable by libbitcoinkernel.
     data_dir: String,
-
     /// How many blocks to walk back from the tip (inclusive of tip).
     blocks: u32,
-
     /// Network the data directory belongs to.
     #[arg(long, value_enum, default_value_t = CliChainType::Regtest)]
     chain: CliChainType,
-
     /// Optional override for the blocks directory (defaults to `<data_dir>/blocks`).
     #[arg(long)]
     blocks_dir: Option<String>,
 }
 
-fn create_context(chain: ChainType) -> Result<Arc<Context>, String> {
-    ContextBuilder::new()
-        .chain_type(chain)
-        .build()
-        .map(Arc::new)
-        .map_err(|e| format!("failed to build kernel context: {e}"))
+#[derive(Debug, Parser)]
+struct NormalizeArgs {
+    /// Raw NDJSON from `scan` (`-` for stdin).
+    input: PathBuf,
+    /// Output format.
+    #[arg(long, value_enum, default_value_t = NormalizeFormat::Ndjson)]
+    format: NormalizeFormat,
+    /// Optional path to write the column schema JSON.
+    #[arg(long)]
+    schema_out: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -66,9 +97,32 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let args = Args::parse();
+    match Cli::parse().command {
+        Command::Scan(args) => run_scan(args),
+        Command::Normalize(args) => run_normalize(args),
+        Command::Schema => {
+            let schema = schema();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&schema)
+                    .map_err(|e| format!("serialize schema: {e}"))?
+            );
+            Ok(())
+        }
+    }
+}
+
+fn create_context(chain: ChainType) -> Result<Arc<Context>, String> {
+    ContextBuilder::new()
+        .chain_type(chain)
+        .build()
+        .map(Arc::new)
+        .map_err(|e| format!("failed to build kernel context: {e}"))
+}
+
+fn run_scan(args: ScanArgs) -> Result<(), String> {
     if args.blocks == 0 {
-        return Err("--blocks / blocks argument must be >= 1".into());
+        return Err("blocks argument must be >= 1".into());
     }
 
     let context = create_context(args.chain.into())?;
@@ -81,7 +135,6 @@ fn run() -> Result<(), String> {
         .build()
         .map_err(|e| format!("chainstate manager build: {e}"))?;
 
-    // Load block index / undo data for an on-disk datadir.
     chainman
         .import_blocks()
         .map_err(|e| format!("import_blocks: {e}"))?;
@@ -121,6 +174,81 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
+fn run_normalize(args: NormalizeArgs) -> Result<(), String> {
+    let sch = schema();
+    if let Some(path) = &args.schema_out {
+        let mut f = File::create(path).map_err(|e| format!("schema_out: {e}"))?;
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string_pretty(&sch).map_err(|e| format!("schema json: {e}"))?
+        )
+        .map_err(|e| format!("schema write: {e}"))?;
+    }
+
+    let reader = open_input(&args.input)?;
+    let mut wrote_csv_header = false;
+
+    for (lineno, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("read line {}: {e}", lineno + 1))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let raw: TxAnalysis = serde_json::from_str(&line)
+            .map_err(|e| format!("parse line {}: {e}", lineno + 1))?;
+        let norm = normalize_tx(&raw);
+
+        match args.format {
+            NormalizeFormat::Ndjson => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&norm).map_err(|e| format!("serialize: {e}"))?
+                );
+            }
+            NormalizeFormat::Csv => {
+                if !wrote_csv_header {
+                    let mut header = vec![
+                        "txid".to_string(),
+                        "block_height".to_string(),
+                        "tx_index".to_string(),
+                        "is_coinbase".to_string(),
+                    ];
+                    header.extend(sch.columns.iter().cloned());
+                    println!("{}", header.join(","));
+                    wrote_csv_header = true;
+                }
+                let mut row = vec![
+                    escape_csv(&norm.txid),
+                    norm.block_height.to_string(),
+                    norm.tx_index.to_string(),
+                    if norm.is_coinbase { "1" } else { "0" }.to_string(),
+                ];
+                row.extend(norm.x.iter().map(|v| format!("{v}")));
+                println!("{}", row.join(","));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn open_input(path: &Path) -> Result<Box<dyn BufRead>, String> {
+    if path.as_os_str() == "-" {
+        Ok(Box::new(BufReader::new(std::io::stdin())))
+    } else {
+        let f = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        Ok(Box::new(BufReader::new(f)))
+    }
+}
+
+fn escape_csv(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
 fn analyze_block(chainman: &ChainstateManager, entry: &BlockTreeEntry<'_>) -> Result<(), String> {
     let height = entry.height();
     let block_hash = entry.block_hash().to_string();
@@ -138,7 +266,6 @@ fn analyze_block(chainman: &ChainstateManager, entry: &BlockTreeEntry<'_>) -> Re
         )
     };
 
-    // Materialize txs so we can build a same-block spend graph for CPFP.
     let mut txs = Vec::with_capacity(block.transaction_count());
     for (tx_index, kernel_tx) in block.transactions().enumerate() {
         let bytes = kernel_tx
@@ -157,7 +284,6 @@ fn analyze_block(chainman: &ChainstateManager, entry: &BlockTreeEntry<'_>) -> Re
             let spent = spent
                 .as_ref()
                 .ok_or_else(|| format!("missing spent outputs for non-genesis block {height}"))?;
-            // Spent-output index is 0-based excluding coinbase.
             let spent_index = tx_index
                 .checked_sub(1)
                 .ok_or_else(|| format!("non-coinbase tx at index 0 in block {height}"))?;
@@ -207,7 +333,6 @@ fn analyze_block(chainman: &ChainstateManager, entry: &BlockTreeEntry<'_>) -> Re
     Ok(())
 }
 
-/// Detect same-block parent/child spends (the confirmed form of a CPFP package).
 fn build_cpfp_context(txs: &[bitcoin::Transaction]) -> Vec<BlockTxContext> {
     let txid_to_index: HashMap<bitcoin::Txid, usize> = txs
         .iter()

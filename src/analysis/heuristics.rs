@@ -1,58 +1,39 @@
 //! Extra heuristics not fully covered by the fingerprint / rawtx crates.
 
+use std::collections::HashMap;
+
 use bitcoin::{Amount, Transaction, TxOut};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::fingerprints::FingerprintFeatures;
 use super::rawtx::{MultisigInfo, RawTxFeatures};
-use super::types::{CpfpRole, PubkeyAlgo, RawInputType, RawOutputType, SighashType};
+use super::types::{CpfpRole, LocktimeShape, PubkeyAlgo, RawInputType, SequenceShape, SighashType};
 use super::BlockTxContext;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HeuristicFeatures {
     /// Dumb equal-amount check: ≥2 non-OP_RETURN outputs share the exact same value.
     pub equal_amount_outputs: bool,
-    /// Likely coinjoin: equal-amount outputs *or* rawtx-rs potentially_coinjoin.
+    /// Likely coinjoin: equal-amount outputs *or* ≥⅓ of all outputs share a value (count > 2).
     pub likely_coinjoin: bool,
-    /// Many inputs (≥3) into 1 or 2 non-OP_RETURN outputs.
+    /// Many inputs (≥3) into 1 or 2 non-OP_RETURN outputs, or ≥10 inputs and ≤2 outputs.
     pub likely_consolidation: bool,
     pub cpfp: CpfpRole,
-    pub is_cpfp_package: bool,
     /// Distinct sighash types seen across all input signatures.
     pub sighashes: Vec<SighashType>,
-    /// Raw nSequence values for every input.
-    pub nsequences: Vec<u32>,
-    /// Non-zero nLockTime (anti-fee-sniping style locktime usage).
-    pub nlocktime_anti_fee_sniping: bool,
-    /// nLockTime encoded as a block height rather than a unix timestamp.
-    pub nlocktime_is_height: bool,
-    pub nlocktime: u32,
-    /// Any input or fingerprint indicates an uncompressed pubkey.
+    /// Per-input nSequence shape.
+    pub sequence_shapes: Vec<SequenceShape>,
+    /// nLockTime shape vs confirming block height.
+    pub locktime_shape: LocktimeShape,
+    /// Any input or output reveals an uncompressed ECDSA pubkey.
     pub has_uncompressed_pubkey: bool,
     /// Distinct multisig configurations observed on inputs.
     pub multisig_configs: Vec<MultisigInfo>,
     pub has_multisig: bool,
-    /// Prevout script types via rawtx-rs.
-    pub prevout_types: Vec<RawOutputType>,
-    /// Spend types from rawtx-rs.
-    pub input_types: Vec<RawInputType>,
     /// Gibson UIH1: some payment-like output is smaller than every input.
     pub uih1: bool,
     /// Gibson UIH2: some input is larger than every output (unnecessary-looking input).
     pub uih2: bool,
-    pub has_op_return: bool,
-    pub reveals_inscription: bool,
-    pub carries_raw_data: bool,
-    /// Any taproot input carries a BIP341 annex.
-    pub has_taproot_annex: bool,
-    /// Any Schnorr sig uses compact SIGHASH_DEFAULT (64-byte).
-    pub has_schnorr_default: bool,
-    /// Any Schnorr sig uses explicit SIGHASH_ALL (65-byte `…01`).
-    pub has_schnorr_explicit_all: bool,
-    /// Creates a P2A / ephemeral-anchor output.
-    pub has_p2a_output: bool,
-    /// Spends a P2A prevout (anchor cleanup).
-    pub spends_p2a: bool,
 }
 
 pub fn extract(
@@ -61,6 +42,7 @@ pub fn extract(
     fingerprints: &FingerprintFeatures,
     rawtx: &RawTxFeatures,
     block_ctx: &BlockTxContext,
+    block_height: i32,
 ) -> HeuristicFeatures {
     let payment_outputs: Vec<&bitcoin::TxOut> = tx
         .output
@@ -69,9 +51,9 @@ pub fn extract(
         .collect();
 
     let equal_amount_outputs = has_equal_amount_outputs(&payment_outputs);
-    let likely_coinjoin = equal_amount_outputs || rawtx.structure.potentially_coinjoin;
-    let likely_consolidation = tx.input.len() >= 3 && payment_outputs.len() <= 2
-        || rawtx.structure.potentially_consolidation;
+    let likely_coinjoin = equal_amount_outputs || potentially_coinjoin(tx);
+    let likely_consolidation = (tx.input.len() >= 3 && payment_outputs.len() <= 2)
+        || (tx.input.len() >= 10 && tx.output.len() <= 2);
 
     let cpfp = match (
         block_ctx.has_same_block_child,
@@ -91,10 +73,14 @@ pub fn extract(
     sighashes.sort_by_key(|s| *s as u8);
     sighashes.dedup();
 
-    let nsequences: Vec<u32> = tx.input.iter().map(|i| i.sequence.0).collect();
+    let sequence_shapes: Vec<SequenceShape> = tx
+        .input
+        .iter()
+        .map(|i| SequenceShape::from_nsequence(i.sequence.0))
+        .collect();
+
     let nlocktime = tx.lock_time.to_consensus_u32();
-    let nlocktime_anti_fee_sniping = nlocktime != 0;
-    let nlocktime_is_height = nlocktime > 0 && nlocktime < 500_000_000;
+    let locktime_shape = LocktimeShape::from_locktime(nlocktime, block_height);
 
     let has_uncompressed_pubkey = fingerprints
         .inputs
@@ -111,49 +97,32 @@ pub fn extract(
                 .any(|p| !p.compressed && p.pubkey_type == PubkeyAlgo::Ecdsa)
         });
 
-    let mut multisig_configs: Vec<MultisigInfo> = rawtx
-        .inputs
-        .iter()
-        .filter_map(|i| i.multisig)
-        .collect();
+    let mut multisig_configs: Vec<MultisigInfo> =
+        rawtx.inputs.iter().filter_map(|i| i.multisig).collect();
     multisig_configs.sort_by_key(|m| (m.m, m.n, m.unknown_n));
     multisig_configs.dedup();
 
-    let prevout_types: Vec<RawOutputType> =
-        fingerprints.inputs.iter().map(|i| i.input_type).collect();
-    let input_types: Vec<RawInputType> = rawtx.inputs.iter().map(|i| i.input_type).collect();
+    let has_multisig = !multisig_configs.is_empty()
+        || rawtx
+            .inputs
+            .iter()
+            .any(|i| matches!(i.input_type, RawInputType::P2ms | RawInputType::P2msLaxDer));
 
     let (uih1, uih2) = uih_flags(prevouts, &payment_outputs);
-    let spends_p2a = prevout_types.iter().any(|t| *t == RawOutputType::P2a)
-        || input_types.iter().any(|t| *t == RawInputType::P2a);
 
     HeuristicFeatures {
         equal_amount_outputs,
         likely_coinjoin,
         likely_consolidation,
         cpfp,
-        is_cpfp_package: cpfp != CpfpRole::None,
         sighashes,
-        nsequences,
-        nlocktime_anti_fee_sniping,
-        nlocktime_is_height,
-        nlocktime,
+        sequence_shapes,
+        locktime_shape,
         has_uncompressed_pubkey,
         multisig_configs,
-        has_multisig: rawtx.script_types.is_spending_multisig,
-        prevout_types,
-        input_types,
+        has_multisig,
         uih1,
         uih2,
-        has_op_return: rawtx.structure.has_opreturn_output,
-        reveals_inscription: rawtx.reveals_inscription,
-        carries_raw_data: rawtx.carries_raw_data,
-        has_taproot_annex: fingerprints.transaction.has_taproot_annex,
-        has_schnorr_default: fingerprints.transaction.has_schnorr_default,
-        has_schnorr_explicit_all: fingerprints.transaction.has_schnorr_explicit_all,
-        has_p2a_output: fingerprints.transaction.has_p2a_output
-            || rawtx.structure.has_p2a_output,
-        spends_p2a,
     }
 }
 
@@ -164,6 +133,20 @@ fn has_equal_amount_outputs(outputs: &[&bitcoin::TxOut]) -> bool {
     let mut amounts: Vec<Amount> = outputs.iter().map(|o| o.value).collect();
     amounts.sort();
     amounts.windows(2).any(|w| w[0] == w[1])
+}
+
+/// rawtx-rs equal-output coinjoin heuristic: ≥2 ins/outs, ≥⅓ of outputs share a
+/// value, and that shared value appears more than twice.
+fn potentially_coinjoin(tx: &Transaction) -> bool {
+    if tx.input.len() < 2 || tx.output.len() < 2 {
+        return false;
+    }
+    let mut counts: HashMap<Amount, usize> = HashMap::new();
+    for output in &tx.output {
+        *counts.entry(output.value).or_insert(0) += 1;
+    }
+    let max_count = counts.values().copied().max().unwrap_or(0);
+    max_count >= tx.output.len() / 3 && max_count > 2
 }
 
 /// Gibson UIH1 / UIH2 (see eprint 2022/589).

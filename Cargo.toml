@@ -11,4 +11,5 @@ hex = "0.4"
 rawtx-rs = { git = "https://github.com/0xB10C/rawtx-rs", branch = "master" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_repr = "0.1.21"
 tx-indexer-fingerprints = { git = "https://github.com/payjoin/tx-indexer", branch = "master" }
