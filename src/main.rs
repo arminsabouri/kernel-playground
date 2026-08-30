@@ -67,7 +67,9 @@ struct ScanArgs {
     /// Path to a Bitcoin Core data directory readable by libbitcoinkernel.
     data_dir: String,
     /// How many blocks to walk back from the tip (inclusive of tip).
-    blocks: u32,
+    /// Omit to scan all the way to genesis.
+    #[arg(long)]
+    depth: Option<u32>,
     /// Network the data directory belongs to.
     #[arg(long, value_enum, default_value_t = CliChainType::Regtest)]
     chain: CliChainType,
@@ -121,8 +123,8 @@ fn create_context(chain: ChainType) -> Result<Arc<Context>, String> {
 }
 
 fn run_scan(args: ScanArgs) -> Result<(), String> {
-    if args.blocks == 0 {
-        return Err("blocks argument must be >= 1".into());
+    if matches!(args.depth, Some(0)) {
+        return Err("depth must be >= 1 (omit --depth to scan to genesis)".into());
     }
 
     let context = create_context(args.chain.into())?;
@@ -144,10 +146,13 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         .ok_or_else(|| "no best block entry (empty chain?)".to_string())?;
     let tip_height = tip.height();
 
-    let start_height = tip_height.saturating_sub(args.blocks.saturating_sub(1) as i32);
+    let start_height = match args.depth {
+        Some(depth) => tip_height.saturating_sub(depth.saturating_sub(1) as i32),
+        None => 0,
+    };
     eprintln!(
         "scanning {} block(s) from height {} to tip {} ({})",
-        args.blocks,
+        tip_height.saturating_sub(start_height) + 1,
         start_height,
         tip_height,
         tip.block_hash()
