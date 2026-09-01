@@ -5,7 +5,10 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use analysis::normalize::NormalizedTx;
 use analysis::{
@@ -18,7 +21,7 @@ use bitcoinkernel::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use polars::prelude::*;
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliChainType {
@@ -39,8 +42,12 @@ impl From<CliChainType> for ChainType {
     }
 }
 
+/// Block results queued between rayon workers and the Parquet writer thread.
+/// Bounds peak RAM to roughly this many blocks' worth of normalized rows.
+const BLOCK_CHANNEL_CAPACITY: usize = 32;
+
 /// Rows buffered per Parquet row group. At ~123 boolean columns this is on the
-/// order of 120MB of staging memory, near the usual Parquet row-group target.
+/// order of 120MB of staging memory
 const DEFAULT_BATCH_SIZE: usize = 1_000_000;
 
 /// Bitcoin tx fingerprint scanner and feature normalizer.
@@ -181,11 +188,36 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         };
     }
 
-    entries.par_iter().for_each(|entry| {
-        analyze_block(&chainman, entry, &sink).unwrap();
+    let chain_read = Arc::new(Mutex::new(()));
+    let columns = &schema_ref().columns;
+    let (row_tx, row_rx) = sync_channel(BLOCK_CHANNEL_CAPACITY);
+
+    // Dedicated writer thread owns the sink so rayon workers never
+    // contend on its mutex (that deadlock stalls the whole pool). A bounded
+    // channel caps in-flight rows to ~BLOCK_CHANNEL_CAPACITY blocks.
+    let writer_handle = thread::spawn(move || -> Result<u64, String> {
+        let mut writer = sink.writer();
+        for rows in row_rx {
+            for norm in &rows {
+                writer.push(norm, columns)?;
+            }
+        }
+        writer.flush()?;
+        sink.finish()
     });
 
-    let rows = sink.finish()?;
+    let scan_result = entries.par_iter().try_for_each(|entry| -> Result<(), String> {
+        row_tx
+            .send(analyze_block(&chainman, &chain_read, entry)?)
+            .map_err(|_| "parquet writer thread exited".to_string())?;
+        Ok(())
+    });
+    drop(row_tx);
+
+    let rows = writer_handle
+        .join()
+        .map_err(|_| "parquet writer thread panicked".to_string())??;
+    scan_result?;
     eprintln!("wrote {} ({rows} rows)", args.output.display());
     Ok(())
 }
@@ -194,12 +226,29 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
 ///
 /// One implementation per output format; `scan` holds it boxed so adding a
 /// format is a new impl rather than a change to the block walk.
+///
+/// The sink itself holds no per-row state: each worker takes its own
+/// [`RowSink::writer`] and buffers into it, so pushing needs no shared lock.
 trait RowSink: Send + Sync {
-    /// Accept one row. `columns` is the feature schema `norm.x` is aligned with.
-    fn push(&self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String>;
+    /// Open a writer with its own buffer, for one worker to own.
+    fn writer(&self) -> Box<dyn RowWriter + '_>;
 
-    /// Flush anything buffered and close the output, returning rows written.
+    /// Close the output, returning the total rows written.
+    ///
+    /// Every [`RowWriter`] must be flushed before this is called.
     fn finish(self: Box<Self>) -> Result<u64, String>;
+}
+
+/// One worker's handle on a [`RowSink`].
+///
+/// Rows accumulate in a buffer this worker owns exclusively; only handing a
+/// completed batch to the sink touches shared state.
+trait RowWriter: Send {
+    /// Accept one row. `columns` is the feature schema `norm.x` is aligned with.
+    fn push(&mut self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String>;
+
+    /// Hand over whatever is left in this worker's buffer.
+    fn flush(self: Box<Self>) -> Result<(), String>;
 }
 
 fn write_schema(path: &Path) -> Result<(), String> {
@@ -318,97 +367,116 @@ impl ParquetRows {
 /// Only `batch_size` rows are held in memory, so a full-chain walk costs a
 /// bounded amount of RAM regardless of how many transactions it visits.
 struct ParquetSink {
-    writer: Arc<RwLock<BatchedWriter<BufWriter<File>>>>,
-    rows: Arc<RwLock<ParquetRows>>,
+    /// Held only while a completed row group is encoded and appended.
+    writer: Mutex<BatchedWriter<BufWriter<File>>>,
+    /// Feature schema, used to lay out each worker's buffer.
+    columns: Vec<String>,
     batch_size: usize,
-    written: Arc<RwLock<u64>>,
+    written: AtomicU64,
 }
 
 impl ParquetSink {
     fn new(path: &Path, columns: &[String], batch_size: usize) -> Result<Self, String> {
-        let rows = ParquetRows::new(columns);
-        let schema = rows.polars_schema();
+        let schema = ParquetRows::new(columns).polars_schema();
         let file = File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
         let writer = ParquetWriter::new(BufWriter::new(file))
             .batched(&schema)
             .map_err(|e| format!("parquet writer: {e}"))?;
         Ok(Self {
-            writer: Arc::new(RwLock::new(writer)),
-            rows: Arc::new(RwLock::new(rows)),
+            writer: Mutex::new(writer),
+            columns: columns.to_vec(),
             batch_size,
-            written: Arc::new(RwLock::new(0)),
+            written: AtomicU64::new(0),
         })
     }
 
-    /// Write the buffered rows as one row group.
+    /// Drain a worker's buffer into the file as one row group.
     ///
-    /// The row buffer is drained under its lock and the lock released before the
-    /// encode, so other threads can keep pushing while this row group is written.
-    fn flush(&self) -> Result<(), String> {
-        let (frame, n) = {
-            let mut rows = self.rows.write().unwrap();
-            let n = rows.len();
-            if n == 0 {
-                return Ok(());
-            }
-            (rows.take_frame()?, n)
-        };
+    /// The only place that touches shared state, so contention scales with the
+    /// number of row groups rather than the number of rows.
+    fn write_group(&self, rows: &mut ParquetRows) -> Result<(), String> {
+        let n = rows.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let frame = rows.take_frame()?;
         self.writer
-            .write()
+            .lock()
             .unwrap()
             .write_batch(&frame)
             .map_err(|e| format!("parquet row group: {e}"))?;
-        *self.written.write().unwrap() += n as u64;
+        self.written.fetch_add(n as u64, Ordering::Relaxed);
         Ok(())
     }
 }
 
 impl RowSink for ParquetSink {
+    fn writer(&self) -> Box<dyn RowWriter + '_> {
+        Box::new(ParquetWorker {
+            sink: self,
+            rows: ParquetRows::new(&self.columns),
+        })
+    }
+
+    /// Write the file footer.
+    ///
+    /// With no rows at all this still emits a valid empty file carrying the schema.
+    fn finish(self: Box<Self>) -> Result<u64, String> {
+        self.writer
+            .lock()
+            .unwrap()
+            .finish()
+            .map_err(|e| format!("parquet footer: {e}"))?;
+        Ok(self.written.load(Ordering::Relaxed))
+    }
+}
+
+/// A single worker's row buffer, flushed to the shared writer when full.
+struct ParquetWorker<'a> {
+    sink: &'a ParquetSink,
+    rows: ParquetRows,
+}
+
+impl RowWriter for ParquetWorker<'_> {
     // TODO: why do we need to store the columns for each row?
-    fn push(&self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String> {
-        let mut rows = self.rows.write().unwrap();
-        rows.push(norm, columns)?;
-        let len = rows.len();
-        drop(rows);
-        if len >= self.batch_size {
-            self.flush()?;
+    fn push(&mut self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String> {
+        self.rows.push(norm, columns)?;
+        if self.rows.len() >= self.sink.batch_size {
+            self.sink.write_group(&mut self.rows)?;
         }
         Ok(())
     }
 
-    /// Flush the tail and write the file footer.
-    ///
-    /// With no rows at all this still emits a valid empty file carrying the schema.
-    fn finish(self: Box<Self>) -> Result<u64, String> {
-        self.flush()?;
-        self.writer
-            .write()
-            .unwrap()
-            .finish()
-            .map_err(|e| format!("parquet footer: {e}"))?;
-        Ok(*self.written.read().unwrap())
+    /// Write this worker's trailing partial row group.
+    fn flush(mut self: Box<Self>) -> Result<(), String> {
+        self.sink.write_group(&mut self.rows)
     }
 }
 
 fn analyze_block(
     chainman: &ChainstateManager,
+    chain_read: &Mutex<()>,
     entry: &BlockTreeEntry<'_>,
-    sink: &Box<dyn RowSink>,
-) -> Result<(), String> {
+) -> Result<Vec<NormalizedTx>, String> {
     let height = entry.height();
     let block_hash = entry.block_hash().to_string();
-    let block = chainman
-        .read_block_data(entry)
-        .map_err(|e| format!("read_block_data at {height}: {e}"))?;
-
-    let spent = if height == 0 {
-        None
-    } else {
-        Some(
-            chainman
-                .read_spent_outputs(entry)
-                .map_err(|e| format!("read_spent_outputs at {height}: {e}"))?,
-        )
+    let (block, spent) = {
+        let _read = chain_read
+            .lock()
+            .map_err(|e| format!("chain read lock: {e}"))?;
+        let block = chainman
+            .read_block_data(entry)
+            .map_err(|e| format!("read_block_data at {height}: {e}"))?;
+        let spent = if height == 0 {
+            None
+        } else {
+            Some(
+                chainman
+                    .read_spent_outputs(entry)
+                    .map_err(|e| format!("read_spent_outputs at {height}: {e}"))?,
+            )
+        };
+        (block, spent)
     };
 
     let mut txs = Vec::with_capacity(block.transaction_count());
@@ -421,6 +489,7 @@ fn analyze_block(
     }
 
     let block_ctxs = build_cpfp_context(&txs);
+    let mut rows = Vec::with_capacity(txs.len());
 
     for (tx_index, tx) in txs.iter().enumerate() {
         let prevouts = if tx.is_coinbase() {
@@ -462,17 +531,14 @@ fn analyze_block(
             tx_index,
             &block_ctxs[tx_index],
         ) {
-            Ok(analysis) => {
-                let norm = normalize_tx(&analysis);
-                sink.push(&norm, &schema_ref().columns)?;
-            }
+            Ok(analysis) => rows.push(normalize_tx(&analysis)),
             Err(err) => {
                 eprintln!("warn: skipping tx {block_hash}:{tx_index}: {err}");
             }
         }
     }
 
-    Ok(())
+    Ok(rows)
 }
 
 fn build_cpfp_context(txs: &[bitcoin::Transaction]) -> Vec<BlockTxContext> {
@@ -536,11 +602,29 @@ mod tests {
     }
 
     fn write_rows(path: &Path, n: usize, batch_size: usize) -> DataFrame {
+        write_rows_workers(path, n, batch_size, 1)
+    }
+
+    /// Write `n` rows spread round-robin over `workers` independent writers,
+    /// the way the rayon fold hands each worker its own buffer.
+    fn write_rows_workers(
+        path: &Path,
+        n: usize,
+        batch_size: usize,
+        workers: usize,
+    ) -> DataFrame {
         let columns = &schema_ref().columns;
-        // Exercise it through the trait object, the way `scan` drives it.
+        // Exercise it through the trait objects, the way `scan` drives them.
         let sink: Box<dyn RowSink> = Box::new(ParquetSink::new(path, columns, batch_size).unwrap());
-        for i in 0..n {
-            sink.push(&row(i, columns), columns).unwrap();
+        {
+            let mut writers: Vec<Box<dyn RowWriter>> =
+                (0..workers).map(|_| sink.writer()).collect();
+            for i in 0..n {
+                writers[i % workers].push(&row(i, columns), columns).unwrap();
+            }
+            for writer in writers {
+                writer.flush().unwrap();
+            }
         }
         assert_eq!(sink.finish().unwrap(), n as u64);
 
@@ -566,6 +650,32 @@ mod tests {
         let txids = streamed.column("txid").unwrap().str().unwrap();
         assert_eq!(txids.get(0), Some("tx0"));
         assert_eq!(txids.get(249), Some("tx249"));
+    }
+
+    /// Every worker's buffer must reach the file, including its partial tail.
+    #[test]
+    fn all_worker_buffers_are_written() {
+        let dir = std::env::temp_dir().join("kp_parquet_stream_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 100 rows over 4 workers at batch 7: each worker fills three full row
+        // groups and keeps a 4-row tail that only `flush` can write.
+        let df = write_rows_workers(&dir.join("workers.parquet"), 100, 7, 4);
+        assert_eq!(df.shape().0, 100);
+
+        // Order is per-worker now, so check the set of txids rather than the order.
+        let mut ids: Vec<String> = df
+            .column("txid")
+            .unwrap()
+            .str()
+            .unwrap()
+            .into_no_null_iter()
+            .map(str::to_string)
+            .collect();
+        ids.sort();
+        let mut expected: Vec<String> = (0..100).map(|i| format!("tx{i}")).collect();
+        expected.sort();
+        assert_eq!(ids, expected, "rows lost or duplicated across workers");
     }
 
     /// A partial trailing batch must still be flushed by `finish`.
