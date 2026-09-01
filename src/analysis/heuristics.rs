@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use bitcoin::{Amount, Transaction, TxOut};
 use serde::{Deserialize, Serialize};
 
+use super::BlockTxContext;
 use super::fingerprints::FingerprintFeatures;
 use super::rawtx::{MultisigInfo, RawTxFeatures};
 use super::types::{CpfpRole, LocktimeShape, PubkeyAlgo, RawInputType, SequenceShape, SighashType};
-use super::BlockTxContext;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HeuristicFeatures {

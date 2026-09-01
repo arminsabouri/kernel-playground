@@ -5,19 +5,20 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use analysis::normalize::NormalizedTx;
 use analysis::{
-    analyze_tx, bitcoin_tx_from_bytes, normalize_tx, prevouts_from_kernel_coins, schema,
-    schema_ref, BlockTxContext,
+    BlockTxContext, analyze_tx, bitcoin_tx_from_bytes, normalize_tx, prevouts_from_kernel_coins,
+    schema, schema_ref,
 };
 use bitcoinkernel::{
-    prelude::*, BlockTreeEntry, ChainType, ChainstateManager, ChainstateManagerBuilder, Context,
-    ContextBuilder,
+    BlockTreeEntry, ChainType, ChainstateManager, ChainstateManagerBuilder, Context,
+    ContextBuilder, prelude::*,
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use polars::prelude::*;
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliChainType {
@@ -129,7 +130,7 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
     // Open the sink before spending minutes importing blocks, so a bad output
     // path fails immediately rather than after the walk.
     let columns = &schema_ref().columns;
-    let mut sink: Box<dyn RowSink> =
+    let sink: Box<dyn RowSink> =
         Box::new(ParquetSink::new(&args.output, columns, args.batch_size)?);
 
     let context = create_context(args.chain.into())?;
@@ -164,14 +165,13 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
     );
 
     let mut entry = tip;
+    let mut entries = Vec::new();
     loop {
         let height = entry.height();
         if height < start_height {
             break;
         }
-
-        analyze_block(&chainman, &entry, sink.as_mut())?;
-
+        entries.push(entry);
         if height == 0 {
             break;
         }
@@ -180,6 +180,10 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
             None => break,
         };
     }
+
+    entries.par_iter().for_each(|entry| {
+        analyze_block(&chainman, entry, &sink).unwrap();
+    });
 
     let rows = sink.finish()?;
     eprintln!("wrote {} ({rows} rows)", args.output.display());
@@ -190,9 +194,9 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
 ///
 /// One implementation per output format; `scan` holds it boxed so adding a
 /// format is a new impl rather than a change to the block walk.
-trait RowSink {
+trait RowSink: Send + Sync {
     /// Accept one row. `columns` is the feature schema `norm.x` is aligned with.
-    fn push(&mut self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String>;
+    fn push(&self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String>;
 
     /// Flush anything buffered and close the output, returning rows written.
     fn finish(self: Box<Self>) -> Result<u64, String>;
@@ -210,6 +214,7 @@ fn write_schema(path: &Path) -> Result<(), String> {
 
 /// Column-major staging buffer for one Parquet row group.
 struct ParquetRows {
+    // TODO: we may not need to store txids.
     txid: Vec<String>,
     block_height: Vec<i32>,
     tx_index: Vec<u32>,
@@ -292,7 +297,11 @@ impl ParquetRows {
     fn take_frame(&mut self) -> Result<DataFrame, String> {
         let mut cols: Vec<Column> = vec![
             Series::new("txid".into(), std::mem::take(&mut self.txid)).into(),
-            Series::new("block_height".into(), std::mem::take(&mut self.block_height)).into(),
+            Series::new(
+                "block_height".into(),
+                std::mem::take(&mut self.block_height),
+            )
+            .into(),
             Series::new("tx_index".into(), std::mem::take(&mut self.tx_index)).into(),
             Series::new("is_coinbase".into(), std::mem::take(&mut self.is_coinbase)).into(),
             Series::new("version".into(), std::mem::take(&mut self.version)).into(),
@@ -309,10 +318,10 @@ impl ParquetRows {
 /// Only `batch_size` rows are held in memory, so a full-chain walk costs a
 /// bounded amount of RAM regardless of how many transactions it visits.
 struct ParquetSink {
-    writer: BatchedWriter<BufWriter<File>>,
-    rows: ParquetRows,
+    writer: Arc<RwLock<BatchedWriter<BufWriter<File>>>>,
+    rows: Arc<RwLock<ParquetRows>>,
     batch_size: usize,
-    written: u64,
+    written: Arc<RwLock<u64>>,
 }
 
 impl ParquetSink {
@@ -324,33 +333,44 @@ impl ParquetSink {
             .batched(&schema)
             .map_err(|e| format!("parquet writer: {e}"))?;
         Ok(Self {
-            writer,
-            rows,
+            writer: Arc::new(RwLock::new(writer)),
+            rows: Arc::new(RwLock::new(rows)),
             batch_size,
-            written: 0,
+            written: Arc::new(RwLock::new(0)),
         })
     }
 
     /// Write the buffered rows as one row group.
-    fn flush(&mut self) -> Result<(), String> {
-        let n = self.rows.len();
-        if n == 0 {
-            return Ok(());
-        }
-        let frame = self.rows.take_frame()?;
+    ///
+    /// The row buffer is drained under its lock and the lock released before the
+    /// encode, so other threads can keep pushing while this row group is written.
+    fn flush(&self) -> Result<(), String> {
+        let (frame, n) = {
+            let mut rows = self.rows.write().unwrap();
+            let n = rows.len();
+            if n == 0 {
+                return Ok(());
+            }
+            (rows.take_frame()?, n)
+        };
         self.writer
+            .write()
+            .unwrap()
             .write_batch(&frame)
             .map_err(|e| format!("parquet row group: {e}"))?;
-        self.written += n as u64;
+        *self.written.write().unwrap() += n as u64;
         Ok(())
     }
-
 }
 
 impl RowSink for ParquetSink {
-    fn push(&mut self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String> {
-        self.rows.push(norm, columns)?;
-        if self.rows.len() >= self.batch_size {
+    // TODO: why do we need to store the columns for each row?
+    fn push(&self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String> {
+        let mut rows = self.rows.write().unwrap();
+        rows.push(norm, columns)?;
+        let len = rows.len();
+        drop(rows);
+        if len >= self.batch_size {
             self.flush()?;
         }
         Ok(())
@@ -359,19 +379,21 @@ impl RowSink for ParquetSink {
     /// Flush the tail and write the file footer.
     ///
     /// With no rows at all this still emits a valid empty file carrying the schema.
-    fn finish(mut self: Box<Self>) -> Result<u64, String> {
+    fn finish(self: Box<Self>) -> Result<u64, String> {
         self.flush()?;
         self.writer
+            .write()
+            .unwrap()
             .finish()
             .map_err(|e| format!("parquet footer: {e}"))?;
-        Ok(self.written)
+        Ok(*self.written.read().unwrap())
     }
 }
 
 fn analyze_block(
     chainman: &ChainstateManager,
     entry: &BlockTreeEntry<'_>,
-    sink: &mut dyn RowSink,
+    sink: &Box<dyn RowSink>,
 ) -> Result<(), String> {
     let height = entry.height();
     let block_hash = entry.block_hash().to_string();
@@ -516,14 +538,15 @@ mod tests {
     fn write_rows(path: &Path, n: usize, batch_size: usize) -> DataFrame {
         let columns = &schema_ref().columns;
         // Exercise it through the trait object, the way `scan` drives it.
-        let mut sink: Box<dyn RowSink> =
-            Box::new(ParquetSink::new(path, columns, batch_size).unwrap());
+        let sink: Box<dyn RowSink> = Box::new(ParquetSink::new(path, columns, batch_size).unwrap());
         for i in 0..n {
             sink.push(&row(i, columns), columns).unwrap();
         }
         assert_eq!(sink.finish().unwrap(), n as u64);
 
-        ParquetReader::new(File::open(path).unwrap()).finish().unwrap()
+        ParquetReader::new(File::open(path).unwrap())
+            .finish()
+            .unwrap()
     }
 
     /// Row-group size must not change the data that comes back out.

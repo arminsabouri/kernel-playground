@@ -74,7 +74,8 @@ pub fn analyze(
     }
 
     // Homogeneous input script type → matching unique output may be change.
-    let input_types: Vec<RawOutputType> = fingerprints.inputs.iter().map(|i| i.input_type).collect();
+    let input_types: Vec<RawOutputType> =
+        fingerprints.inputs.iter().map(|i| i.input_type).collect();
     if !input_types.is_empty() && input_types.iter().all(|t| *t == input_types[0]) {
         let itype = input_types[0];
         let matching: Vec<usize> = payment

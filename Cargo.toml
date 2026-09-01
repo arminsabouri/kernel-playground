@@ -14,3 +14,4 @@ serde_json = "1"
 serde_repr = "0.1.21"
 tx-indexer-fingerprints = { git = "https://github.com/payjoin/tx-indexer", branch = "master" }
 polars = { version = "0.51", default-features = false, features = ["parquet"] }
+rayon = "1.12"

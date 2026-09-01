@@ -85,9 +85,11 @@ where
         .into_iter()
         .map(|(value_sat, script_bytes)| {
             Ok(TxOut {
-                value: Amount::from_sat(value_sat.try_into().map_err(|_| {
-                    format!("negative or overflowing coin value: {value_sat}")
-                })?),
+                value: Amount::from_sat(
+                    value_sat
+                        .try_into()
+                        .map_err(|_| format!("negative or overflowing coin value: {value_sat}"))?,
+                ),
                 script_pubkey: bitcoin::ScriptBuf::from_bytes(script_bytes),
             })
         })

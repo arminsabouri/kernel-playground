@@ -183,10 +183,9 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
     b.push_bool("h_uih1", h.uih1);
     b.push_bool("h_uih2", h.uih2);
 
-    let prevout_types = unique_by(
-        tx.fingerprints.inputs.iter().map(|i| i.input_type),
-        |x| x as u8,
-    );
+    let prevout_types = unique_by(tx.fingerprints.inputs.iter().map(|i| i.input_type), |x| {
+        x as u8
+    });
     let input_types = unique_by(raw.inputs.iter().map(|i| i.input_type), |x| x as u8);
     let output_types = unique_by(raw.outputs.iter().map(|o| o.output_type), |x| x as u8);
     b.push_multi_hot("prevout_type", &prevout_types);
