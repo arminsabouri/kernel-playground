@@ -75,6 +75,10 @@ impl ScanFormat {
     }
 }
 
+/// Rows buffered per Parquet row group. At ~123 boolean columns this is on the
+/// order of 120MB of staging memory, near the usual Parquet row-group target.
+const DEFAULT_BATCH_SIZE: usize = 1_000_000;
+
 /// Bitcoin tx fingerprint scanner and feature normalizer.
 #[derive(Debug, Parser)]
 #[command(name = "kernel-playground", version, about)]
@@ -118,6 +122,9 @@ struct ScanArgs {
     /// Optional path to write the column schema JSON.
     #[arg(long)]
     schema_out: Option<PathBuf>,
+    /// Rows per Parquet row group. Caps how much is held in memory at once.
+    #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
+    batch_size: usize,
 }
 
 #[derive(Debug, Parser)]
@@ -133,6 +140,9 @@ struct NormalizeArgs {
     /// Optional path to write the column schema JSON.
     #[arg(long)]
     schema_out: Option<PathBuf>,
+    /// Rows per Parquet row group. Caps how much is held in memory at once.
+    #[arg(long, default_value_t = DEFAULT_BATCH_SIZE)]
+    batch_size: usize,
 }
 
 fn main() -> ExitCode {
@@ -178,6 +188,7 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
             format,
             args.output.as_deref(),
             args.schema_out.as_deref(),
+            args.batch_size,
         )?)),
         None => {
             if let Some(path) = &args.schema_out {
@@ -244,6 +255,7 @@ fn run_normalize(args: NormalizeArgs) -> Result<(), String> {
         args.format,
         args.output.as_deref(),
         args.schema_out.as_deref(),
+        args.batch_size,
     )?;
 
     let reader = open_input(&args.input)?;
@@ -299,8 +311,8 @@ struct RowSink {
     /// Text sink for NDJSON / CSV.
     out: Option<Box<dyn Write>>,
     wrote_csv_header: bool,
-    /// Column accumulator for Parquet, with its destination path.
-    parquet: Option<(ParquetRows, PathBuf)>,
+    /// Streaming Parquet writer, with its destination path.
+    parquet: Option<(ParquetSink, PathBuf)>,
 }
 
 impl RowSink {
@@ -308,6 +320,7 @@ impl RowSink {
         format: NormalizeFormat,
         output: Option<&Path>,
         schema_out: Option<&Path>,
+        batch_size: usize,
     ) -> Result<Self, String> {
         let sch = schema_ref();
         if let Some(path) = schema_out {
@@ -316,10 +329,14 @@ impl RowSink {
 
         let (out, parquet) = match format {
             NormalizeFormat::Parquet => {
+                if batch_size == 0 {
+                    return Err("--batch-size must be >= 1".into());
+                }
                 let path = output
                     .ok_or_else(|| "--format parquet requires --output".to_string())?
                     .to_path_buf();
-                (None, Some((ParquetRows::new(&sch.columns), path)))
+                let sink = ParquetSink::new(&path, &sch.columns, batch_size)?;
+                (None, Some((sink, path)))
             }
             NormalizeFormat::Ndjson | NormalizeFormat::Csv => (Some(open_output(output)?), None),
         };
@@ -365,17 +382,16 @@ impl RowSink {
                 writeln!(out, "{}", row.join(",")).map_err(|e| format!("write: {e}"))
             }
             NormalizeFormat::Parquet => {
-                let (rows, _) = self.parquet.as_mut().expect("parquet sink has an accumulator");
-                rows.push(&norm, &self.schema.columns)
+                let (sink, _) = self.parquet.as_mut().expect("parquet sink has a writer");
+                sink.push(&norm, &self.schema.columns)
             }
         }
     }
 
     fn finish(self) -> Result<(), String> {
-        if let Some((rows, path)) = self.parquet {
-            rows.write(&path)
-                .map_err(|e| format!("write parquet {}: {e}", path.display()))?;
-            eprintln!("wrote {}", path.display());
+        if let Some((sink, path)) = self.parquet {
+            let rows = sink.finish()?;
+            eprintln!("wrote {} ({rows} rows)", path.display());
         }
         if let Some(mut out) = self.out {
             out.flush().map_err(|e| format!("flush: {e}"))?;
@@ -421,6 +437,7 @@ fn escape_csv(s: &str) -> String {
     }
 }
 
+/// Column-major staging buffer for one Parquet row group.
 struct ParquetRows {
     txid: Vec<String>,
     block_height: Vec<i32>,
@@ -450,6 +467,29 @@ impl ParquetRows {
         }
     }
 
+    fn len(&self) -> usize {
+        self.txid.len()
+    }
+
+    /// Polars schema of the frames produced by [`ParquetRows::take_frame`].
+    ///
+    /// Declared up front so every row group in the file shares one schema.
+    fn polars_schema(&self) -> Schema {
+        let mut fields: Vec<(PlSmallStr, DataType)> = vec![
+            ("txid".into(), DataType::String),
+            ("block_height".into(), DataType::Int32),
+            ("tx_index".into(), DataType::UInt32),
+            ("is_coinbase".into(), DataType::Boolean),
+            ("version".into(), DataType::Int32),
+        ];
+        fields.extend(
+            self.bool_names
+                .iter()
+                .map(|name| (name.as_str().into(), DataType::Boolean)),
+        );
+        Schema::from_iter(fields)
+    }
+
     fn push(&mut self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String> {
         if norm.x.len() != columns.len() {
             return Err(format!(
@@ -475,23 +515,82 @@ impl ParquetRows {
         Ok(())
     }
 
-    fn write(self, path: &Path) -> Result<(), String> {
+    /// Drain the buffered rows into a frame, leaving the buffer empty and reusable.
+    ///
+    /// Column order must match [`ParquetRows::polars_schema`].
+    fn take_frame(&mut self) -> Result<DataFrame, String> {
         let mut cols: Vec<Column> = vec![
-            Series::new("txid".into(), self.txid).into(),
-            Series::new("block_height".into(), self.block_height).into(),
-            Series::new("tx_index".into(), self.tx_index).into(),
-            Series::new("is_coinbase".into(), self.is_coinbase).into(),
-            Series::new("version".into(), self.version).into(),
+            Series::new("txid".into(), std::mem::take(&mut self.txid)).into(),
+            Series::new("block_height".into(), std::mem::take(&mut self.block_height)).into(),
+            Series::new("tx_index".into(), std::mem::take(&mut self.tx_index)).into(),
+            Series::new("is_coinbase".into(), std::mem::take(&mut self.is_coinbase)).into(),
+            Series::new("version".into(), std::mem::take(&mut self.version)).into(),
         ];
-        for (name, values) in self.bool_names.into_iter().zip(self.bool_cols) {
-            cols.push(Series::new(name.as_str().into(), values).into());
+        for (name, values) in self.bool_names.iter().zip(self.bool_cols.iter_mut()) {
+            cols.push(Series::new(name.as_str().into(), std::mem::take(values)).into());
         }
-        let mut df = DataFrame::new(cols).map_err(|e| format!("dataframe: {e}"))?;
-        let mut file = File::create(path).map_err(|e| e.to_string())?;
-        ParquetWriter::new(&mut file)
-            .finish(&mut df)
-            .map_err(|e| format!("parquet: {e}"))?;
+        DataFrame::new(cols).map_err(|e| format!("dataframe: {e}"))
+    }
+}
+
+/// Streams feature rows to Parquet one row group at a time.
+///
+/// Only `batch_size` rows are held in memory, so a full-chain walk costs a
+/// bounded amount of RAM regardless of how many transactions it visits.
+struct ParquetSink {
+    writer: BatchedWriter<BufWriter<File>>,
+    rows: ParquetRows,
+    batch_size: usize,
+    written: u64,
+}
+
+impl ParquetSink {
+    fn new(path: &Path, columns: &[String], batch_size: usize) -> Result<Self, String> {
+        let rows = ParquetRows::new(columns);
+        let schema = rows.polars_schema();
+        let file = File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+        let writer = ParquetWriter::new(BufWriter::new(file))
+            .batched(&schema)
+            .map_err(|e| format!("parquet writer: {e}"))?;
+        Ok(Self {
+            writer,
+            rows,
+            batch_size,
+            written: 0,
+        })
+    }
+
+    fn push(&mut self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String> {
+        self.rows.push(norm, columns)?;
+        if self.rows.len() >= self.batch_size {
+            self.flush()?;
+        }
         Ok(())
+    }
+
+    /// Write the buffered rows as one row group.
+    fn flush(&mut self) -> Result<(), String> {
+        let n = self.rows.len();
+        if n == 0 {
+            return Ok(());
+        }
+        let frame = self.rows.take_frame()?;
+        self.writer
+            .write_batch(&frame)
+            .map_err(|e| format!("parquet row group: {e}"))?;
+        self.written += n as u64;
+        Ok(())
+    }
+
+    /// Flush the tail and write the file footer.
+    ///
+    /// With no rows at all this still emits a valid empty file carrying the schema.
+    fn finish(mut self) -> Result<u64, String> {
+        self.flush()?;
+        self.writer
+            .finish()
+            .map_err(|e| format!("parquet footer: {e}"))?;
+        Ok(self.written)
     }
 }
 
@@ -607,4 +706,83 @@ fn build_cpfp_context(txs: &[bitcoin::Transaction]) -> Vec<BlockTxContext> {
             has_same_block_child: parents_with_child.contains(&i),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Synthetic normalized row; `x` must be schema-wide.
+    fn row(i: usize, columns: &[String]) -> NormalizedTx {
+        let x = columns
+            .iter()
+            .enumerate()
+            .map(|(j, name)| {
+                if name == "version" {
+                    2.0
+                } else if (i + j).is_multiple_of(3) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        NormalizedTx {
+            txid: format!("tx{i}"),
+            block_height: i as i32,
+            tx_index: i,
+            is_coinbase: i == 0,
+            x,
+        }
+    }
+
+    fn write_rows(path: &Path, n: usize, batch_size: usize) -> DataFrame {
+        let columns = &schema_ref().columns;
+        let mut sink = ParquetSink::new(path, columns, batch_size).unwrap();
+        for i in 0..n {
+            sink.push(&row(i, columns), columns).unwrap();
+        }
+        assert_eq!(sink.finish().unwrap(), n as u64);
+
+        ParquetReader::new(File::open(path).unwrap()).finish().unwrap()
+    }
+
+    /// Row-group size must not change the data that comes back out.
+    #[test]
+    fn batching_does_not_change_contents() {
+        let dir = std::env::temp_dir().join("kp_parquet_stream_test");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let streamed = write_rows(&dir.join("many.parquet"), 250, 7);
+        let single = write_rows(&dir.join("one.parquet"), 250, 10_000);
+
+        assert_eq!(streamed.shape(), single.shape());
+        assert_eq!(streamed.shape().0, 250);
+        assert!(streamed.equals(&single), "row groups changed the contents");
+
+        // Metadata columns survived the round trip in order.
+        let txids = streamed.column("txid").unwrap().str().unwrap();
+        assert_eq!(txids.get(0), Some("tx0"));
+        assert_eq!(txids.get(249), Some("tx249"));
+    }
+
+    /// A partial trailing batch must still be flushed by `finish`.
+    #[test]
+    fn trailing_partial_batch_is_written() {
+        let dir = std::env::temp_dir().join("kp_parquet_stream_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 10 rows at batch 4 => 2 full groups + a 2-row tail.
+        let df = write_rows(&dir.join("tail.parquet"), 10, 4);
+        assert_eq!(df.shape().0, 10);
+    }
+
+    /// Zero rows must still produce a readable file carrying the schema.
+    #[test]
+    fn empty_input_writes_valid_file() {
+        let dir = std::env::temp_dir().join("kp_parquet_stream_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let df = write_rows(&dir.join("empty.parquet"), 0, 16);
+        assert_eq!(df.shape().0, 0);
+        assert_eq!(df.width(), schema_ref().columns.len() + 4);
+    }
 }

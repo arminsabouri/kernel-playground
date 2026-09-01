@@ -27,4 +27,9 @@ cargo run -- normalize raw.ndjson --format parquet -o features.parquet
 Prefer the single `scan` invocation: it avoids the multi-hundred-megabyte
 intermediate file and a full JSON serialize/parse round trip per transaction.
 
+Parquet output is streamed one row group at a time, so memory stays flat over a
+full-chain walk rather than growing with the number of transactions. `--batch-size`
+(default 1,000,000 rows) sets the row group size and thus the memory ceiling; a
+crash mid-walk leaves the row groups written so far readable.
+
 `cargo run -- schema` prints the feature column schema on its own.
