@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 pub use change::ChangeAnalysis;
 pub use fingerprints::FingerprintFeatures;
 pub use heuristics::HeuristicFeatures;
-pub use normalize::{normalize_tx, schema};
+pub use normalize::{normalize_tx, schema, schema_ref};
 pub use rawtx::RawTxFeatures;
 
 /// Everything we currently extract about a single confirmed transaction.

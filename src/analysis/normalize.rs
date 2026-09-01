@@ -10,6 +10,8 @@
 //! Aggregates that are linear functions of another block (e.g. "any RBF" vs
 //! sequence-shape multi-hot) are omitted.
 
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 use super::TxAnalysis;
@@ -93,14 +95,25 @@ impl FeatureBuilder {
 
 /// Stable column names for the normalized feature vector.
 pub fn schema() -> FeatureSchema {
-    let mut b = FeatureBuilder::new_schema();
-    encode_into(&dummy_analysis(), &mut b);
-    FeatureSchema { columns: b.columns }
+    schema_ref().clone()
+}
+
+/// Borrowed view of the process-wide schema.
+///
+/// Building the schema allocates a column name per feature, so hot paths that
+/// normalize millions of rows must not call [`schema`] per row.
+pub fn schema_ref() -> &'static FeatureSchema {
+    static SCHEMA: OnceLock<FeatureSchema> = OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        let mut b = FeatureBuilder::new_schema();
+        encode_into(&dummy_analysis(), &mut b);
+        FeatureSchema { columns: b.columns }
+    })
 }
 
 /// Encode one raw analysis record into a normalized row.
 pub fn normalize_tx(tx: &TxAnalysis) -> NormalizedTx {
-    let sch = schema();
+    let sch = schema_ref();
     let mut b = FeatureBuilder::new_row(sch.columns.len());
     encode_into(tx, &mut b);
     debug_assert_eq!(

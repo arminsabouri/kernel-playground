@@ -2,15 +2,16 @@ mod analysis;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use analysis::{
     analyze_tx, bitcoin_tx_from_bytes, normalize_tx, prevouts_from_kernel_coins, schema,
-    BlockTxContext, TxAnalysis,
+    schema_ref, BlockTxContext, TxAnalysis,
 };
+use analysis::normalize::{FeatureSchema, NormalizedTx};
 use bitcoinkernel::{
     prelude::*, BlockTreeEntry, ChainType, ChainstateManager, ChainstateManagerBuilder, Context,
     ContextBuilder,
@@ -37,6 +38,7 @@ impl From<CliChainType> for ChainType {
     }
 }
 
+/// Normalized feature-matrix output formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum NormalizeFormat {
     /// One JSON object per line: metadata + `x` feature vector.
@@ -45,6 +47,32 @@ enum NormalizeFormat {
     Csv,
     /// Polars dataframe as Parquet (bool columns + integer version). Requires `--output`.
     Parquet,
+}
+
+/// What `scan` writes. Normalization happens in-process for every variant but
+/// `raw-ndjson`, which dumps the internal analysis records for later replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ScanFormat {
+    /// Raw per-tx analysis JSON, one object per line (legacy `scan | normalize` input).
+    RawNdjson,
+    /// Normalized NDJSON: metadata + `x` feature vector.
+    Ndjson,
+    /// Normalized CSV with a header row matching the feature schema.
+    Csv,
+    /// Normalized Parquet feature matrix. Requires `--output`.
+    Parquet,
+}
+
+impl ScanFormat {
+    /// The normalized format this maps to, or `None` for the raw passthrough.
+    fn as_normalize(self) -> Option<NormalizeFormat> {
+        match self {
+            ScanFormat::RawNdjson => None,
+            ScanFormat::Ndjson => Some(NormalizeFormat::Ndjson),
+            ScanFormat::Csv => Some(NormalizeFormat::Csv),
+            ScanFormat::Parquet => Some(NormalizeFormat::Parquet),
+        }
+    }
 }
 
 /// Bitcoin tx fingerprint scanner and feature normalizer.
@@ -57,9 +85,11 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Walk blocks from tip and emit raw per-tx analysis as NDJSON.
+    /// Walk blocks from tip, analyze each tx, and emit a normalized feature matrix.
     Scan(ScanArgs),
-    /// Read raw analysis NDJSON and emit a normalized feature matrix.
+    /// Compatibility shim: normalize an existing raw NDJSON file from `scan --format raw-ndjson`.
+    ///
+    /// Prefer `scan --format parquet -o ...`, which skips the intermediate file.
     Normalize(NormalizeArgs),
     /// Print the normalized feature column schema as JSON.
     Schema,
@@ -79,16 +109,25 @@ struct ScanArgs {
     /// Optional override for the blocks directory (defaults to `<data_dir>/blocks`).
     #[arg(long)]
     blocks_dir: Option<String>,
+    /// Output format. Everything but `raw-ndjson` normalizes in-process.
+    #[arg(long, value_enum, default_value_t = ScanFormat::RawNdjson)]
+    format: ScanFormat,
+    /// Output path (defaults to stdout). Required for `--format parquet`.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    /// Optional path to write the column schema JSON.
+    #[arg(long)]
+    schema_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
 struct NormalizeArgs {
-    /// Raw NDJSON from `scan` (`-` for stdin).
+    /// Raw NDJSON from `scan --format raw-ndjson` (`-` for stdin).
     input: PathBuf,
     /// Output format.
     #[arg(long, value_enum, default_value_t = NormalizeFormat::Ndjson)]
     format: NormalizeFormat,
-    /// Output path. Required for `--format parquet`.
+    /// Output path (defaults to stdout). Required for `--format parquet`.
     #[arg(short, long)]
     output: Option<PathBuf>,
     /// Optional path to write the column schema JSON.
@@ -133,6 +172,21 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         return Err("depth must be >= 1 (omit --depth to scan to genesis)".into());
     }
 
+    // Fail on bad output flags before spending minutes importing blocks.
+    let mut sink = match args.format.as_normalize() {
+        Some(format) => Sink::Normalized(Box::new(RowSink::new(
+            format,
+            args.output.as_deref(),
+            args.schema_out.as_deref(),
+        )?)),
+        None => {
+            if let Some(path) = &args.schema_out {
+                write_schema(path)?;
+            }
+            Sink::Raw(open_output(args.output.as_deref())?)
+        }
+    };
+
     let context = create_context(args.chain.into())?;
     let blocks_dir = args
         .blocks_dir
@@ -171,7 +225,7 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
             break;
         }
 
-        analyze_block(&chainman, &entry)?;
+        analyze_block(&chainman, &entry, &mut sink)?;
 
         if height == 0 {
             break;
@@ -182,56 +236,124 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         };
     }
 
-    Ok(())
+    sink.finish()
 }
 
 fn run_normalize(args: NormalizeArgs) -> Result<(), String> {
-    if args.format == NormalizeFormat::Parquet && args.output.is_none() {
-        return Err("--format parquet requires --output".into());
-    }
-
-    let sch = schema();
-    if let Some(path) = &args.schema_out {
-        let mut f = File::create(path).map_err(|e| format!("schema_out: {e}"))?;
-        writeln!(
-            f,
-            "{}",
-            serde_json::to_string_pretty(&sch).map_err(|e| format!("schema json: {e}"))?
-        )
-        .map_err(|e| format!("schema write: {e}"))?;
-    }
+    let mut sink = RowSink::new(
+        args.format,
+        args.output.as_deref(),
+        args.schema_out.as_deref(),
+    )?;
 
     let reader = open_input(&args.input)?;
-    let mut wrote_csv_header = false;
-    let mut parquet_rows = ParquetRows::new(&sch.columns);
-
     for (lineno, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| format!("read line {}: {e}", lineno + 1))?;
         if line.trim().is_empty() {
             continue;
         }
-        let raw: TxAnalysis = serde_json::from_str(&line)
-            .map_err(|e| format!("parse line {}: {e}", lineno + 1))?;
-        let norm = normalize_tx(&raw);
+        let raw: TxAnalysis =
+            serde_json::from_str(&line).map_err(|e| format!("parse line {}: {e}", lineno + 1))?;
+        sink.push(&raw)?;
+    }
 
-        match args.format {
+    sink.finish()
+}
+
+/// Where `scan` sends each analyzed tx.
+enum Sink {
+    /// Legacy passthrough: serialize the internal analysis record verbatim.
+    Raw(Box<dyn Write>),
+    /// Normalize in-process and accumulate / stream feature rows.
+    /// Boxed: the accumulator is much larger than the raw writer.
+    Normalized(Box<RowSink>),
+}
+
+impl Sink {
+    fn push(&mut self, raw: &TxAnalysis) -> Result<(), String> {
+        match self {
+            Sink::Raw(out) => {
+                let line = serde_json::to_string(raw)
+                    .map_err(|e| format!("serialize analysis: {e}"))?;
+                writeln!(out, "{line}").map_err(|e| format!("write: {e}"))
+            }
+            Sink::Normalized(sink) => sink.push(raw),
+        }
+    }
+
+    fn finish(self) -> Result<(), String> {
+        match self {
+            Sink::Raw(mut out) => out.flush().map_err(|e| format!("flush: {e}")),
+            Sink::Normalized(sink) => sink.finish(),
+        }
+    }
+}
+
+/// Normalizes [`TxAnalysis`] records and emits them in the requested format.
+///
+/// NDJSON and CSV stream row by row; Parquet accumulates columns in memory
+/// until [`RowSink::finish`].
+struct RowSink {
+    format: NormalizeFormat,
+    schema: &'static FeatureSchema,
+    /// Text sink for NDJSON / CSV.
+    out: Option<Box<dyn Write>>,
+    wrote_csv_header: bool,
+    /// Column accumulator for Parquet, with its destination path.
+    parquet: Option<(ParquetRows, PathBuf)>,
+}
+
+impl RowSink {
+    fn new(
+        format: NormalizeFormat,
+        output: Option<&Path>,
+        schema_out: Option<&Path>,
+    ) -> Result<Self, String> {
+        let sch = schema_ref();
+        if let Some(path) = schema_out {
+            write_schema(path)?;
+        }
+
+        let (out, parquet) = match format {
+            NormalizeFormat::Parquet => {
+                let path = output
+                    .ok_or_else(|| "--format parquet requires --output".to_string())?
+                    .to_path_buf();
+                (None, Some((ParquetRows::new(&sch.columns), path)))
+            }
+            NormalizeFormat::Ndjson | NormalizeFormat::Csv => (Some(open_output(output)?), None),
+        };
+
+        Ok(Self {
+            format,
+            schema: sch,
+            out,
+            wrote_csv_header: false,
+            parquet,
+        })
+    }
+
+    fn push(&mut self, raw: &TxAnalysis) -> Result<(), String> {
+        let norm = normalize_tx(raw);
+        match self.format {
             NormalizeFormat::Ndjson => {
-                println!(
-                    "{}",
-                    serde_json::to_string(&norm).map_err(|e| format!("serialize: {e}"))?
-                );
+                let out = self.out.as_mut().expect("ndjson sink has a writer");
+                let line =
+                    serde_json::to_string(&norm).map_err(|e| format!("serialize: {e}"))?;
+                writeln!(out, "{line}").map_err(|e| format!("write: {e}"))
             }
             NormalizeFormat::Csv => {
-                if !wrote_csv_header {
+                let out = self.out.as_mut().expect("csv sink has a writer");
+                if !self.wrote_csv_header {
                     let mut header = vec![
                         "txid".to_string(),
                         "block_height".to_string(),
                         "tx_index".to_string(),
                         "is_coinbase".to_string(),
                     ];
-                    header.extend(sch.columns.iter().cloned());
-                    println!("{}", header.join(","));
-                    wrote_csv_header = true;
+                    header.extend(self.schema.columns.iter().cloned());
+                    writeln!(out, "{}", header.join(",")).map_err(|e| format!("write: {e}"))?;
+                    self.wrote_csv_header = true;
                 }
                 let mut row = vec![
                     escape_csv(&norm.txid),
@@ -240,21 +362,36 @@ fn run_normalize(args: NormalizeArgs) -> Result<(), String> {
                     if norm.is_coinbase { "1" } else { "0" }.to_string(),
                 ];
                 row.extend(norm.x.iter().map(|v| format!("{v}")));
-                println!("{}", row.join(","));
+                writeln!(out, "{}", row.join(",")).map_err(|e| format!("write: {e}"))
             }
-            NormalizeFormat::Parquet => parquet_rows.push(&norm, &sch.columns)?,
+            NormalizeFormat::Parquet => {
+                let (rows, _) = self.parquet.as_mut().expect("parquet sink has an accumulator");
+                rows.push(&norm, &self.schema.columns)
+            }
         }
     }
 
-    if args.format == NormalizeFormat::Parquet {
-        let path = args.output.as_ref().unwrap();
-        parquet_rows
-            .write(path)
-            .map_err(|e| format!("write parquet {}: {e}", path.display()))?;
-        eprintln!("wrote {}", path.display());
+    fn finish(self) -> Result<(), String> {
+        if let Some((rows, path)) = self.parquet {
+            rows.write(&path)
+                .map_err(|e| format!("write parquet {}: {e}", path.display()))?;
+            eprintln!("wrote {}", path.display());
+        }
+        if let Some(mut out) = self.out {
+            out.flush().map_err(|e| format!("flush: {e}"))?;
+        }
+        Ok(())
     }
+}
 
-    Ok(())
+fn write_schema(path: &Path) -> Result<(), String> {
+    let mut f = File::create(path).map_err(|e| format!("schema_out: {e}"))?;
+    writeln!(
+        f,
+        "{}",
+        serde_json::to_string_pretty(schema_ref()).map_err(|e| format!("schema json: {e}"))?
+    )
+    .map_err(|e| format!("schema write: {e}"))
 }
 
 fn open_input(path: &Path) -> Result<Box<dyn BufRead>, String> {
@@ -263,6 +400,16 @@ fn open_input(path: &Path) -> Result<Box<dyn BufRead>, String> {
     } else {
         let f = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
         Ok(Box::new(BufReader::new(f)))
+    }
+}
+
+fn open_output(path: Option<&Path>) -> Result<Box<dyn Write>, String> {
+    match path {
+        Some(path) if path.as_os_str() != "-" => {
+            let f = File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+            Ok(Box::new(BufWriter::new(f)))
+        }
+        _ => Ok(Box::new(BufWriter::new(std::io::stdout()))),
     }
 }
 
@@ -303,11 +450,7 @@ impl ParquetRows {
         }
     }
 
-    fn push(
-        &mut self,
-        norm: &analysis::normalize::NormalizedTx,
-        columns: &[String],
-    ) -> Result<(), String> {
+    fn push(&mut self, norm: &NormalizedTx, columns: &[String]) -> Result<(), String> {
         if norm.x.len() != columns.len() {
             return Err(format!(
                 "feature width {} != schema {}",
@@ -352,7 +495,11 @@ impl ParquetRows {
     }
 }
 
-fn analyze_block(chainman: &ChainstateManager, entry: &BlockTreeEntry<'_>) -> Result<(), String> {
+fn analyze_block(
+    chainman: &ChainstateManager,
+    entry: &BlockTreeEntry<'_>,
+    sink: &mut Sink,
+) -> Result<(), String> {
     let height = entry.height();
     let block_hash = entry.block_hash().to_string();
     let block = chainman
@@ -420,13 +567,7 @@ fn analyze_block(chainman: &ChainstateManager, entry: &BlockTreeEntry<'_>) -> Re
             tx_index,
             &block_ctxs[tx_index],
         ) {
-            Ok(analysis) => {
-                println!(
-                    "{}",
-                    serde_json::to_string(&analysis)
-                        .map_err(|e| format!("serialize analysis: {e}"))?
-                );
-            }
+            Ok(analysis) => sink.push(&analysis)?,
             Err(err) => {
                 eprintln!("warn: skipping tx {block_hash}:{tx_index}: {err}");
             }
