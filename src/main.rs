@@ -16,6 +16,7 @@ use bitcoinkernel::{
     ContextBuilder,
 };
 use clap::{Parser, Subcommand, ValueEnum};
+use polars::prelude::*;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliChainType {
@@ -36,12 +37,14 @@ impl From<CliChainType> for ChainType {
     }
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum NormalizeFormat {
     /// One JSON object per line: metadata + `x` feature vector.
     Ndjson,
     /// CSV with a header row matching the feature schema (metadata columns first).
     Csv,
+    /// Polars dataframe as Parquet (bool columns + integer version). Requires `--output`.
+    Parquet,
 }
 
 /// Bitcoin tx fingerprint scanner and feature normalizer.
@@ -56,7 +59,7 @@ struct Cli {
 enum Command {
     /// Walk blocks from tip and emit raw per-tx analysis as NDJSON.
     Scan(ScanArgs),
-    /// Read raw analysis NDJSON and emit a normalized numeric feature matrix.
+    /// Read raw analysis NDJSON and emit a normalized feature matrix.
     Normalize(NormalizeArgs),
     /// Print the normalized feature column schema as JSON.
     Schema,
@@ -85,6 +88,9 @@ struct NormalizeArgs {
     /// Output format.
     #[arg(long, value_enum, default_value_t = NormalizeFormat::Ndjson)]
     format: NormalizeFormat,
+    /// Output path. Required for `--format parquet`.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
     /// Optional path to write the column schema JSON.
     #[arg(long)]
     schema_out: Option<PathBuf>,
@@ -180,6 +186,10 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
 }
 
 fn run_normalize(args: NormalizeArgs) -> Result<(), String> {
+    if args.format == NormalizeFormat::Parquet && args.output.is_none() {
+        return Err("--format parquet requires --output".into());
+    }
+
     let sch = schema();
     if let Some(path) = &args.schema_out {
         let mut f = File::create(path).map_err(|e| format!("schema_out: {e}"))?;
@@ -193,6 +203,7 @@ fn run_normalize(args: NormalizeArgs) -> Result<(), String> {
 
     let reader = open_input(&args.input)?;
     let mut wrote_csv_header = false;
+    let mut parquet_rows = ParquetRows::new(&sch.columns);
 
     for (lineno, line) in reader.lines().enumerate() {
         let line = line.map_err(|e| format!("read line {}: {e}", lineno + 1))?;
@@ -231,7 +242,16 @@ fn run_normalize(args: NormalizeArgs) -> Result<(), String> {
                 row.extend(norm.x.iter().map(|v| format!("{v}")));
                 println!("{}", row.join(","));
             }
+            NormalizeFormat::Parquet => parquet_rows.push(&norm, &sch.columns)?,
         }
+    }
+
+    if args.format == NormalizeFormat::Parquet {
+        let path = args.output.as_ref().unwrap();
+        parquet_rows
+            .write(path)
+            .map_err(|e| format!("write parquet {}: {e}", path.display()))?;
+        eprintln!("wrote {}", path.display());
     }
 
     Ok(())
@@ -251,6 +271,84 @@ fn escape_csv(s: &str) -> String {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
         s.to_string()
+    }
+}
+
+struct ParquetRows {
+    txid: Vec<String>,
+    block_height: Vec<i32>,
+    tx_index: Vec<u32>,
+    is_coinbase: Vec<bool>,
+    version: Vec<i32>,
+    bool_names: Vec<String>,
+    bool_cols: Vec<Vec<bool>>,
+}
+
+impl ParquetRows {
+    fn new(columns: &[String]) -> Self {
+        let bool_names: Vec<String> = columns
+            .iter()
+            .filter(|name| *name != "version")
+            .cloned()
+            .collect();
+        let bool_cols = vec![Vec::new(); bool_names.len()];
+        Self {
+            txid: Vec::new(),
+            block_height: Vec::new(),
+            tx_index: Vec::new(),
+            is_coinbase: Vec::new(),
+            version: Vec::new(),
+            bool_names,
+            bool_cols,
+        }
+    }
+
+    fn push(
+        &mut self,
+        norm: &analysis::normalize::NormalizedTx,
+        columns: &[String],
+    ) -> Result<(), String> {
+        if norm.x.len() != columns.len() {
+            return Err(format!(
+                "feature width {} != schema {}",
+                norm.x.len(),
+                columns.len()
+            ));
+        }
+        self.txid.push(norm.txid.clone());
+        self.block_height.push(norm.block_height);
+        self.tx_index.push(norm.tx_index as u32);
+        self.is_coinbase.push(norm.is_coinbase);
+
+        let mut bool_i = 0;
+        for (name, value) in columns.iter().zip(norm.x.iter()) {
+            if name == "version" {
+                self.version.push(*value as i32);
+            } else {
+                self.bool_cols[bool_i].push(*value != 0.0);
+                bool_i += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn write(self, path: &Path) -> Result<(), String> {
+        let mut cols: Vec<Column> = vec![
+            Series::new("txid".into(), self.txid).into(),
+            Series::new("block_height".into(), self.block_height).into(),
+            Series::new("tx_index".into(), self.tx_index).into(),
+            Series::new("is_coinbase".into(), self.is_coinbase).into(),
+            Series::new("version".into(), self.version).into(),
+        ];
+        for (name, values) in self.bool_names.into_iter().zip(self.bool_cols) {
+            cols.push(Series::new(name.as_str().into(), values).into());
+        }
+        let mut df = DataFrame::new(cols).map_err(|e| format!("dataframe: {e}"))?;
+        let mut file = File::create(path).map_err(|e| e.to_string())?;
+        ParquetWriter::new(&mut file)
+            .finish(&mut df)
+            .map_err(|e| format!("parquet: {e}"))?;
+        Ok(())
     }
 }
 
