@@ -1450,6 +1450,7 @@ dependencies = [
  "hex",
  "polars",
  "rawtx-rs",
+ "rayon",
  "serde",
  "serde_json",
  "serde_repr",

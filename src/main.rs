@@ -18,6 +18,7 @@ use bitcoinkernel::{
 };
 use clap::{Parser, Subcommand, ValueEnum};
 use polars::prelude::*;
+use rayon::prelude::*;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliChainType {
@@ -398,56 +399,64 @@ fn analyze_block(
         txs.push(tx);
     }
 
+    // Kernel handles are FFI-bound and not `Send`, so prevouts are pulled out
+    // here, on this thread, before any parallel work starts.
+    let mut prevouts: Vec<Vec<bitcoin::TxOut>> = Vec::with_capacity(txs.len());
+    for (tx_index, tx) in txs.iter().enumerate() {
+        if tx.is_coinbase() {
+            prevouts.push(Vec::new());
+            continue;
+        }
+        let spent = spent
+            .as_ref()
+            .ok_or_else(|| format!("missing spent outputs for non-genesis block {height}"))?;
+        let spent_index = tx_index
+            .checked_sub(1)
+            .ok_or_else(|| format!("non-coinbase tx at index 0 in block {height}"))?;
+        let tx_spent = spent
+            .transaction_spent_outputs(spent_index)
+            .map_err(|e| format!("tx spent outputs {block_hash}:{tx_index}: {e}"))?;
+
+        let coin_pairs: Vec<(i64, Vec<u8>)> = tx_spent
+            .coins()
+            .map(|coin| {
+                let out = coin.output();
+                (out.value(), out.script_pubkey().to_bytes())
+            })
+            .collect();
+
+        if coin_pairs.len() != tx.input.len() {
+            return Err(format!(
+                "prevout count mismatch at {block_hash}:{tx_index}: {} coins vs {} inputs",
+                coin_pairs.len(),
+                tx.input.len()
+            ));
+        }
+        prevouts.push(prevouts_from_kernel_coins(coin_pairs)?);
+    }
+
     let block_ctxs = build_cpfp_context(&txs);
 
-    for (tx_index, tx) in txs.iter().enumerate() {
-        let prevouts = if tx.is_coinbase() {
-            Vec::new()
-        } else {
-            let spent = spent
-                .as_ref()
-                .ok_or_else(|| format!("missing spent outputs for non-genesis block {height}"))?;
-            let spent_index = tx_index
-                .checked_sub(1)
-                .ok_or_else(|| format!("non-coinbase tx at index 0 in block {height}"))?;
-            let tx_spent = spent
-                .transaction_spent_outputs(spent_index)
-                .map_err(|e| format!("tx spent outputs {block_hash}:{tx_index}: {e}"))?;
-
-            let coin_pairs: Vec<(i64, Vec<u8>)> = tx_spent
-                .coins()
-                .map(|coin| {
-                    let out = coin.output();
-                    (out.value(), out.script_pubkey().to_bytes())
-                })
-                .collect();
-
-            if coin_pairs.len() != tx.input.len() {
-                return Err(format!(
-                    "prevout count mismatch at {block_hash}:{tx_index}: {} coins vs {} inputs",
-                    coin_pairs.len(),
-                    tx.input.len()
-                ));
+    // Analysis is pure over owned data, so it fans out across the block's txs.
+    // `collect` into an indexed Vec keeps rows in block order.
+    let rows: Vec<Option<NormalizedTx>> = txs
+        .par_iter()
+        .zip(prevouts.par_iter())
+        .zip(block_ctxs.par_iter())
+        .enumerate()
+        .map(|(tx_index, ((tx, prevouts), block_ctx))| {
+            match analyze_tx(tx, prevouts, height, &block_hash, tx_index, block_ctx) {
+                Ok(analysis) => Some(normalize_tx(&analysis)),
+                Err(err) => {
+                    eprintln!("warn: skipping tx {block_hash}:{tx_index}: {err}");
+                    None
+                }
             }
-            prevouts_from_kernel_coins(coin_pairs)?
-        };
+        })
+        .collect();
 
-        match analyze_tx(
-            tx,
-            &prevouts,
-            height,
-            &block_hash,
-            tx_index,
-            &block_ctxs[tx_index],
-        ) {
-            Ok(analysis) => {
-                let norm = normalize_tx(&analysis);
-                sink.push(&norm, &schema_ref().columns)?;
-            }
-            Err(err) => {
-                eprintln!("warn: skipping tx {block_hash}:{tx_index}: {err}");
-            }
-        }
+    for norm in rows.iter().flatten() {
+        sink.push(norm, &schema_ref().columns)?;
     }
 
     Ok(())
