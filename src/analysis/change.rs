@@ -65,12 +65,11 @@ pub fn analyze(
         }
     }
 
-    if let Some(min_in) = prevouts.iter().map(|p| p.value).min() {
-        if let Some((vout, out)) = payment.iter().min_by_key(|(_, o)| o.value) {
-            if out.value < min_in {
-                push_heuristic(&mut scores, *vout, ChangeHeuristic::OptimalChange);
-            }
-        }
+    if let Some(min_in) = prevouts.iter().map(|p| p.value).min()
+        && let Some((vout, out)) = payment.iter().min_by_key(|(_, o)| o.value)
+        && out.value < min_in
+    {
+        push_heuristic(&mut scores, *vout, ChangeHeuristic::OptimalChange);
     }
 
     // Homogeneous input script type → matching unique output may be change.
@@ -111,9 +110,9 @@ fn push_heuristic(
     vout: usize,
     heuristic: ChangeHeuristic,
 ) {
-    if let Some((_, hs)) = scores.iter_mut().find(|(i, _)| *i == vout) {
-        if !hs.contains(&heuristic) {
-            hs.push(heuristic);
-        }
+    if let Some((_, hs)) = scores.iter_mut().find(|(i, _)| *i == vout)
+        && !hs.contains(&heuristic)
+    {
+        hs.push(heuristic);
     }
 }

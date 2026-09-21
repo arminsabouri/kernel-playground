@@ -77,7 +77,7 @@ pub fn analyze_tx(
 }
 
 /// Convert kernel spent-output coins into rust-bitcoin [`TxOut`]s.
-pub fn prevouts_from_kernel_coins<'a, I>(coins: I) -> Result<Vec<TxOut>, String>
+pub fn prevouts_from_kernel_coins<I>(coins: I) -> Result<Vec<TxOut>, String>
 where
     I: IntoIterator<Item = (i64, Vec<u8>)>,
 {

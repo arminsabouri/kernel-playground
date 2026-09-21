@@ -477,11 +477,11 @@ fn build_cpfp_context(txs: &[bitcoin::Transaction]) -> Vec<BlockTxContext> {
             continue;
         }
         for input in &tx.input {
-            if let Some(&parent_idx) = txid_to_index.get(&input.previous_output.txid) {
-                if parent_idx < child_idx {
-                    parents_with_child.insert(parent_idx);
-                    children_with_parent.insert(child_idx);
-                }
+            if let Some(&parent_idx) = txid_to_index.get(&input.previous_output.txid)
+                && parent_idx < child_idx
+            {
+                parents_with_child.insert(parent_idx);
+                children_with_parent.insert(child_idx);
             }
         }
     }

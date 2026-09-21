@@ -107,7 +107,7 @@ fn taproot_input_info(txin: &TxIn) -> TaprootInputInfo {
             // witness: [ <sig> (<annex>) ]
             txin.witness
                 .nth(0)
-                .and_then(|sig| SchnorrSighashForm::from_sig_bytes(sig))
+                .and_then(SchnorrSighashForm::from_sig_bytes)
                 .into_iter()
                 .collect()
         }
