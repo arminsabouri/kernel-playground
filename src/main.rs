@@ -6,6 +6,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use analysis::normalize::NormalizedTx;
 use analysis::{
@@ -38,6 +39,10 @@ impl From<CliChainType> for ChainType {
         }
     }
 }
+
+/// How often the scan prints a progress line. A full-chain walk runs for hours,
+/// so silence is indistinguishable from a hang.
+const PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Rows buffered per Parquet row group. At ~123 boolean columns this is on the
 /// order of 120MB of staging memory, near the usual Parquet row-group target.
@@ -201,13 +206,17 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         entry.block_hash()
     );
 
+    let total_blocks = (end_height.saturating_sub(start_height) + 1) as u64;
+    let mut progress = Progress::new(total_blocks);
+
     loop {
         let height = entry.height();
         if height < start_height {
             break;
         }
 
-        analyze_block(&chainman, &entry, sink.as_mut())?;
+        let outcome = analyze_block(&chainman, &entry, sink.as_mut())?;
+        progress.record(height, &outcome);
 
         if height == 0 {
             break;
@@ -219,8 +228,106 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
     }
 
     let rows = sink.finish()?;
+    progress.finish();
     eprintln!("wrote {} ({rows} rows)", args.output.display());
     Ok(())
+}
+
+/// Periodic scan progress on stderr, plus a skipped-tx tally.
+///
+/// Skipped transactions are counted rather than printed one by one: a bad run
+/// could otherwise emit millions of lines, and the analysis now runs on rayon
+/// threads where those prints would interleave.
+struct Progress {
+    total_blocks: u64,
+    blocks: u64,
+    rows: u64,
+    skipped: u64,
+    first_error: Option<String>,
+    started: Instant,
+    last_print: Instant,
+}
+
+impl Progress {
+    fn new(total_blocks: u64) -> Self {
+        let now = Instant::now();
+        Self {
+            total_blocks,
+            blocks: 0,
+            rows: 0,
+            skipped: 0,
+            first_error: None,
+            started: now,
+            last_print: now,
+        }
+    }
+
+    fn record(&mut self, height: i32, outcome: &BlockOutcome) {
+        self.blocks += 1;
+        self.rows += outcome.rows;
+        self.skipped += outcome.skipped;
+        if self.first_error.is_none() {
+            self.first_error.clone_from(&outcome.first_error);
+        }
+
+        if self.last_print.elapsed() >= PROGRESS_INTERVAL {
+            self.print(height);
+            self.last_print = Instant::now();
+        }
+    }
+
+    fn print(&self, height: i32) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        let bps = if elapsed > 0.0 {
+            self.blocks as f64 / elapsed
+        } else {
+            0.0
+        };
+        // Blocks remaining at the current rate; the walk runs tip-to-genesis, so
+        // `height` alone does not say how much is left.
+        let eta = if bps > 0.0 {
+            format_duration(((self.total_blocks - self.blocks) as f64 / bps) as u64)
+        } else {
+            "?".to_string()
+        };
+        eprintln!(
+            "  height {height}: {}/{} blocks, {} rows, {:.1} blocks/s, eta {eta}",
+            self.blocks, self.total_blocks, self.rows, bps
+        );
+    }
+
+    fn finish(&self) {
+        let elapsed = self.started.elapsed().as_secs_f64();
+        eprintln!(
+            "scanned {} block(s), {} tx in {} ({:.1} blocks/s)",
+            self.blocks,
+            self.rows,
+            format_duration(elapsed as u64),
+            if elapsed > 0.0 {
+                self.blocks as f64 / elapsed
+            } else {
+                0.0
+            }
+        );
+        if self.skipped > 0 {
+            eprintln!(
+                "warn: skipped {} tx that failed analysis; first was {}",
+                self.skipped,
+                self.first_error.as_deref().unwrap_or("unknown")
+            );
+        }
+    }
+}
+
+fn format_duration(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m:02}m")
+    } else if m > 0 {
+        format!("{m}m{s:02}s")
+    } else {
+        format!("{s}s")
+    }
 }
 
 /// Destination for normalized feature rows.
@@ -409,7 +516,7 @@ fn analyze_block(
     chainman: &ChainstateManager,
     entry: &BlockTreeEntry<'_>,
     sink: &mut dyn RowSink,
-) -> Result<(), String> {
+) -> Result<BlockOutcome, String> {
     let height = entry.height();
     let block_hash = entry.block_hash().to_string();
     let block = chainman
@@ -475,27 +582,48 @@ fn analyze_block(
 
     // Analysis is pure over owned data, so it fans out across the block's txs.
     // `collect` into an indexed Vec keeps rows in block order.
-    let rows: Vec<Option<NormalizedTx>> = txs
+    let rows: Vec<Result<NormalizedTx, String>> = txs
         .par_iter()
         .zip(prevouts.par_iter())
         .zip(block_ctxs.par_iter())
         .enumerate()
         .map(|(tx_index, ((tx, prevouts), block_ctx))| {
             match analyze_tx(tx, prevouts, height, &block_hash, tx_index, block_ctx) {
-                Ok(analysis) => Some(normalize_tx(&analysis)),
-                Err(err) => {
-                    eprintln!("warn: skipping tx {block_hash}:{tx_index}: {err}");
-                    None
-                }
+                Ok(analysis) => Ok(normalize_tx(&analysis)),
+                // Reported back to the caller rather than printed here: this
+                // closure runs on rayon threads, where prints interleave.
+                Err(err) => Err(format!("tx {block_hash}:{tx_index}: {err}")),
             }
         })
         .collect();
 
-    for norm in rows.iter().flatten() {
-        sink.push(norm, &schema_ref().columns)?;
+    let mut outcome = BlockOutcome::default();
+    for row in &rows {
+        match row {
+            Ok(norm) => {
+                sink.push(norm, &schema_ref().columns)?;
+                outcome.rows += 1;
+            }
+            Err(err) => {
+                outcome.skipped += 1;
+                if outcome.first_error.is_none() {
+                    outcome.first_error = Some(err.clone());
+                }
+            }
+        }
     }
 
-    Ok(())
+    Ok(outcome)
+}
+
+/// What one block contributed to the scan.
+#[derive(Debug, Default)]
+struct BlockOutcome {
+    rows: u64,
+    skipped: u64,
+    /// One sample error, so a run can show *why* txs are being skipped without
+    /// emitting a line per failure.
+    first_error: Option<String>,
 }
 
 fn build_cpfp_context(txs: &[bitcoin::Transaction]) -> Vec<BlockTxContext> {
