@@ -8,14 +8,14 @@ use serde::{Deserialize, Serialize};
 use super::fingerprints::FingerprintFeatures;
 use super::types::{ChangeHeuristic, RawOutputType};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ChangeCandidate {
     pub vout: usize,
     pub value_sat: u64,
     pub heuristics: Vec<ChangeHeuristic>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ChangeAnalysis {
     /// Best-effort change vouts. Empty when nothing looks like change.
     pub candidates: Vec<ChangeCandidate>,

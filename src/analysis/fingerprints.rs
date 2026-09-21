@@ -11,13 +11,13 @@ use super::types::{
     InputSorting, OutputStructure, RawOutputType, SchnorrSighashForm, TaprootSpendPath,
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct FingerprintFeatures {
     pub transaction: TransactionFingerprints,
     pub inputs: Vec<InputFingerprints>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct TransactionFingerprints {
     pub address_reuse: bool,
     pub mixed_input_types: bool,

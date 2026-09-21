@@ -24,7 +24,7 @@ pub use rawtx::RawTxFeatures;
 ///
 /// Fields are kept close to their source heuristics so they can later be
 /// normalized / one-hot encoded independently.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct TxAnalysis {
     pub txid: String,
     pub block_height: i32,

@@ -56,8 +56,17 @@ impl FeatureBuilder {
     }
 
     fn push_bool(&mut self, name: &str, v: bool) {
+        self.push_bool_lazy(|| name.to_string(), v);
+    }
+
+    /// Like [`FeatureBuilder::push_bool`], but the column name is only built
+    /// when the schema is being recorded.
+    ///
+    /// Row encoding discards the name, so a `format!` per feature per row would
+    /// be ~120 throwaway allocations for every transaction scanned.
+    fn push_bool_lazy(&mut self, name: impl FnOnce() -> String, v: bool) {
         if self.recording_schema {
-            self.columns.push(name.to_string());
+            self.columns.push(name());
         } else {
             self.values.push(if v { 1.0 } else { 0.0 });
         }
@@ -74,22 +83,26 @@ impl FeatureBuilder {
     fn push_one_hot<T: Categorical + std::fmt::Display>(&mut self, prefix: &str, value: T) {
         debug_assert_eq!(T::cardinality(), T::all().len());
         for variant in T::all() {
-            let name = format!("{prefix}__{}", variant.label());
-            self.push_bool(&name, variant.dense_id() == value.dense_id());
+            self.push_bool_lazy(
+                || format!("{prefix}__{}", variant.label()),
+                variant.dense_id() == value.dense_id(),
+            );
         }
     }
 
     fn push_multi_hot<T: Categorical + std::fmt::Display>(&mut self, prefix: &str, values: &[T]) {
         for variant in T::all() {
-            let name = format!("{prefix}__{}", variant.label());
-            self.push_bool(&name, values.iter().any(|v| v == variant));
+            self.push_bool_lazy(
+                || format!("{prefix}__{}", variant.label()),
+                values.iter().any(|v| v == variant),
+            );
         }
     }
 
     fn push_optional_bool_one_hot(&mut self, prefix: &str, value: Option<bool>) {
-        self.push_bool(&format!("{prefix}__none"), value.is_none());
-        self.push_bool(&format!("{prefix}__false"), value == Some(false));
-        self.push_bool(&format!("{prefix}__true"), value == Some(true));
+        self.push_bool_lazy(|| format!("{prefix}__none"), value.is_none());
+        self.push_bool_lazy(|| format!("{prefix}__false"), value == Some(false));
+        self.push_bool_lazy(|| format!("{prefix}__true"), value == Some(true));
     }
 }
 
@@ -217,36 +230,56 @@ fn unique_by<T: Copy + Eq>(items: impl IntoIterator<Item = T>, key: impl Fn(T) -
 }
 
 /// Minimal placeholder used only while recording schema column names.
+///
+/// Every field is `Default`, so adding or renaming one is a compile-time
+/// concern rather than something that breaks the schema probe at runtime.
 fn dummy_analysis() -> TxAnalysis {
-    serde_json::from_str(
-        r#"{
-          "txid":"0",
-          "block_height":0,
-          "block_hash":"0",
-          "tx_index":0,
-          "is_coinbase":false,
-          "fingerprints":{
-            "transaction":{
-              "address_reuse":false,"mixed_input_types":false,"input_order":[],
-              "nlocktime_optin_without_use":false,"bip68_with_absolute_locktime":false,
-              "outputs_bip69_sorted":false,"output_structure":0,"round_fee":null
-            },
-            "inputs":[]
-          },
-          "rawtx":{
-            "version":2,
-            "inputs":[],"outputs":[]
-          },
-          "heuristics":{
-            "equal_amount_outputs":false,"likely_coinjoin":false,"likely_consolidation":false,
-            "cpfp":0,"sighashes":[],"sequence_shapes":[],"locktime_shape":0,
-            "has_uncompressed_pubkey":false,"multisig_configs":[],"has_multisig":false,
-            "uih1":false,"uih2":false
-          },
-          "change":{
-            "candidates":[],"no_change_apparent":true
-          }
-        }"#,
-    )
-    .expect("dummy TxAnalysis JSON")
+    TxAnalysis::default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Checked-in column list. Regenerate with:
+    /// `cargo run -- schema | jq -r '.columns[]' > src/analysis/schema_columns.txt`
+    const GOLDEN: &str = include_str!("schema_columns.txt");
+
+    /// The feature vector's column order is a wire format: every Parquet file
+    /// ever written is only interpretable against it. Reordering or renaming a
+    /// column silently invalidates historical output, so it has to be a
+    /// deliberate, reviewed change to the golden file.
+    #[test]
+    fn schema_matches_golden() {
+        let golden: Vec<&str> = GOLDEN.lines().filter(|l| !l.is_empty()).collect();
+        let actual = &schema_ref().columns;
+
+        // Compare position by position so a diff points at the drift, not just
+        // at a length mismatch.
+        for (i, (want, got)) in golden.iter().zip(actual.iter()).enumerate() {
+            assert_eq!(got, want, "column {i} drifted from the golden schema");
+        }
+        assert_eq!(
+            actual.len(),
+            golden.len(),
+            "feature count changed; review and regenerate schema_columns.txt"
+        );
+    }
+
+    /// Duplicate names would make a column ambiguous downstream (and Parquet
+    /// would happily write both).
+    #[test]
+    fn schema_columns_are_unique() {
+        let cols = &schema_ref().columns;
+        let unique: HashSet<&String> = cols.iter().collect();
+        assert_eq!(unique.len(), cols.len(), "duplicate feature column name");
+    }
+
+    /// A row must line up with the schema it claims to be encoded against.
+    #[test]
+    fn row_width_matches_schema() {
+        let norm = normalize_tx(&TxAnalysis::default());
+        assert_eq!(norm.x.len(), schema_ref().columns.len());
+    }
 }

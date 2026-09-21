@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::types::{DerEncoding, PubkeyAlgo, RawInputType, RawOutputType, SigAlgo, SighashType};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct RawTxFeatures {
     pub version: i32,
     pub inputs: Vec<InputCharacteristics>,

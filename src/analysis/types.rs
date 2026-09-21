@@ -85,9 +85,10 @@ impl fmt::Display for InputSorting {
 }
 
 /// Coarse output-count structure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr, Default)]
 #[repr(u8)]
 pub enum OutputStructure {
+    #[default]
     Single = 0,
     Double = 1,
     Multi = 2,
@@ -503,9 +504,10 @@ impl fmt::Display for DerEncoding {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr, Default)]
 #[repr(u8)]
 pub enum CpfpRole {
+    #[default]
     None = 0,
     Parent = 1,
     Child = 2,
@@ -595,10 +597,11 @@ impl fmt::Display for SequenceShape {
 ///
 /// Height-delta bins follow common anti-fee-sniping practice (Core/Electrum often
 /// use tip or tip−1; deltas ≥100 are weak/odd for that heuristic).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr, Default)]
 #[repr(u8)]
 pub enum LocktimeShape {
     /// nLockTime = 0.
+    #[default]
     None = 0,
     /// Height-based, locktime == confirming height.
     HeightExact = 1,

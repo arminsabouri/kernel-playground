@@ -10,7 +10,7 @@ use super::rawtx::{MultisigInfo, RawTxFeatures};
 use super::types::{CpfpRole, LocktimeShape, PubkeyAlgo, RawInputType, SequenceShape, SighashType};
 use super::BlockTxContext;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct HeuristicFeatures {
     /// Dumb equal-amount check: ≥2 non-OP_RETURN outputs share the exact same value.
     pub equal_amount_outputs: bool,
