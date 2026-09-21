@@ -6,7 +6,9 @@
 //! - set-valued categoricals → multi-hot over the same vocabulary
 //! - version kept as a raw float (no z-score yet)
 //!
-//! Identifiers (`txid`, block hash) stay as metadata beside the vector.
+//! Only `block_height` and `is_coinbase` ride along as metadata. Per-tx
+//! identifiers (txid, position in block) carry no wallet-fingerprint signal and
+//! nothing downstream joins on them, so they are not stored.
 //! Aggregates that are linear functions of another block (e.g. "any RBF" vs
 //! sequence-shape multi-hot) are omitted.
 
@@ -19,9 +21,7 @@ use super::types::Categorical;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedTx {
-    pub txid: String,
     pub block_height: i32,
-    pub tx_index: usize,
     pub is_coinbase: bool,
     /// Feature values aligned with [`schema`].
     pub x: Vec<f64>,
@@ -135,9 +135,7 @@ pub fn normalize_tx(tx: &TxAnalysis) -> NormalizedTx {
         "feature vector width drifted from schema"
     );
     NormalizedTx {
-        txid: tx.txid.clone(),
         block_height: tx.block_height,
-        tx_index: tx.tx_index,
         is_coinbase: tx.is_coinbase,
         x: b.values,
     }

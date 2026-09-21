@@ -26,10 +26,8 @@ pub use rawtx::RawTxFeatures;
 /// normalized / one-hot encoded independently.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct TxAnalysis {
-    pub txid: String,
     pub block_height: i32,
     pub block_hash: String,
-    pub tx_index: usize,
     pub is_coinbase: bool,
     pub fingerprints: FingerprintFeatures,
     pub rawtx: RawTxFeatures,
@@ -54,7 +52,6 @@ pub fn analyze_tx(
     prevouts: &[TxOut],
     block_height: i32,
     block_hash: &str,
-    tx_index: usize,
     block_ctx: &BlockTxContext,
 ) -> Result<TxAnalysis, String> {
     let fingerprints = fingerprints::extract(tx, prevouts);
@@ -64,10 +61,8 @@ pub fn analyze_tx(
     let change = change::analyze(tx, prevouts, &fingerprints);
 
     Ok(TxAnalysis {
-        txid: tx.compute_txid().to_string(),
         block_height,
         block_hash: block_hash.to_string(),
-        tx_index,
         is_coinbase: tx.is_coinbase(),
         fingerprints,
         rawtx,

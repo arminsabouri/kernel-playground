@@ -354,9 +354,7 @@ fn write_schema(path: &Path) -> Result<(), String> {
 
 /// Column-major staging buffer for one Parquet row group.
 struct ParquetRows {
-    txid: Vec<String>,
     block_height: Vec<i32>,
-    tx_index: Vec<u32>,
     is_coinbase: Vec<bool>,
     version: Vec<i32>,
     bool_names: Vec<String>,
@@ -372,9 +370,7 @@ impl ParquetRows {
             .collect();
         let bool_cols = vec![Vec::new(); bool_names.len()];
         Self {
-            txid: Vec::new(),
             block_height: Vec::new(),
-            tx_index: Vec::new(),
             is_coinbase: Vec::new(),
             version: Vec::new(),
             bool_names,
@@ -383,7 +379,7 @@ impl ParquetRows {
     }
 
     fn len(&self) -> usize {
-        self.txid.len()
+        self.block_height.len()
     }
 
     /// Polars schema of the frames produced by [`ParquetRows::take_frame`].
@@ -391,9 +387,7 @@ impl ParquetRows {
     /// Declared up front so every row group in the file shares one schema.
     fn polars_schema(&self) -> Schema {
         let mut fields: Vec<(PlSmallStr, DataType)> = vec![
-            ("txid".into(), DataType::String),
             ("block_height".into(), DataType::Int32),
-            ("tx_index".into(), DataType::UInt32),
             ("is_coinbase".into(), DataType::Boolean),
             ("version".into(), DataType::Int32),
         ];
@@ -413,9 +407,7 @@ impl ParquetRows {
                 columns.len()
             ));
         }
-        self.txid.push(norm.txid.clone());
         self.block_height.push(norm.block_height);
-        self.tx_index.push(norm.tx_index as u32);
         self.is_coinbase.push(norm.is_coinbase);
 
         let mut bool_i = 0;
@@ -435,9 +427,7 @@ impl ParquetRows {
     /// Column order must match [`ParquetRows::polars_schema`].
     fn take_frame(&mut self) -> Result<DataFrame, String> {
         let mut cols: Vec<Column> = vec![
-            Series::new("txid".into(), std::mem::take(&mut self.txid)).into(),
             Series::new("block_height".into(), std::mem::take(&mut self.block_height)).into(),
-            Series::new("tx_index".into(), std::mem::take(&mut self.tx_index)).into(),
             Series::new("is_coinbase".into(), std::mem::take(&mut self.is_coinbase)).into(),
             Series::new("version".into(), std::mem::take(&mut self.version)).into(),
         ];
@@ -588,7 +578,7 @@ fn analyze_block(
         .zip(block_ctxs.par_iter())
         .enumerate()
         .map(|(tx_index, ((tx, prevouts), block_ctx))| {
-            match analyze_tx(tx, prevouts, height, &block_hash, tx_index, block_ctx) {
+            match analyze_tx(tx, prevouts, height, &block_hash, block_ctx) {
                 Ok(analysis) => Ok(normalize_tx(&analysis)),
                 // Reported back to the caller rather than printed here: this
                 // closure runs on rayon threads, where prints interleave.
@@ -678,9 +668,7 @@ mod tests {
             })
             .collect();
         NormalizedTx {
-            txid: format!("tx{i}"),
             block_height: i as i32,
-            tx_index: i,
             is_coinbase: i == 0,
             x,
         }
@@ -713,9 +701,9 @@ mod tests {
         assert!(streamed.equals(&single), "row groups changed the contents");
 
         // Metadata columns survived the round trip in order.
-        let txids = streamed.column("txid").unwrap().str().unwrap();
-        assert_eq!(txids.get(0), Some("tx0"));
-        assert_eq!(txids.get(249), Some("tx249"));
+        let heights = streamed.column("block_height").unwrap().i32().unwrap();
+        assert_eq!(heights.get(0), Some(0));
+        assert_eq!(heights.get(249), Some(249));
     }
 
     /// A partial trailing batch must still be flushed by `finish`.
@@ -735,6 +723,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let df = write_rows(&dir.join("empty.parquet"), 0, 16);
         assert_eq!(df.shape().0, 0);
-        assert_eq!(df.width(), schema_ref().columns.len() + 4);
+        assert_eq!(df.width(), schema_ref().columns.len() + 2);
     }
 }
