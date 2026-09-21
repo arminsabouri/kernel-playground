@@ -11,6 +11,10 @@ cargo run -- scan ~/.bitcoin --chain mainnet --depth 1000 \
 # omit --depth to walk to genesis
 ```
 
+Use `--start-height` / `--end-height` (both inclusive) to scan an explicit range
+instead of a depth from the tip. That also makes a long walk restartable: if a run
+dies at height N, resume it with `--end-height N`.
+
 Output is streamed one row group at a time, so memory stays flat over a full-chain
 walk rather than growing with the number of transactions. `--batch-size` (default
 1,000,000 rows) sets the row group size and thus the memory ceiling; a crash

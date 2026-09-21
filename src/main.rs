@@ -65,8 +65,17 @@ struct ScanArgs {
     data_dir: String,
     /// How many blocks to walk back from the tip (inclusive of tip).
     /// Omit to scan all the way to genesis.
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["start_height", "end_height"])]
     depth: Option<u32>,
+    /// Lowest block height to scan (inclusive). Defaults to genesis.
+    #[arg(long)]
+    start_height: Option<u32>,
+    /// Highest block height to scan (inclusive). Defaults to the tip.
+    ///
+    /// With `--start-height`, this makes a run restartable: a walk that died at
+    /// height N resumes with `--end-height N`.
+    #[arg(long)]
+    end_height: Option<u32>,
     /// Network the data directory belongs to.
     #[arg(long, value_enum, default_value_t = CliChainType::Regtest)]
     chain: CliChainType,
@@ -152,19 +161,46 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         .ok_or_else(|| "no best block entry (empty chain?)".to_string())?;
     let tip_height = tip.height();
 
-    let start_height = match args.depth {
-        Some(depth) => tip_height.saturating_sub(depth.saturating_sub(1) as i32),
-        None => 0,
+    let end_height = match args.end_height {
+        Some(end) => {
+            let end = end as i32;
+            if end > tip_height {
+                return Err(format!(
+                    "--end-height {end} is above the tip at {tip_height}"
+                ));
+            }
+            end
+        }
+        None => tip_height,
     };
+    let start_height = match (args.start_height, args.depth) {
+        (Some(start), _) => start as i32,
+        (None, Some(depth)) => tip_height.saturating_sub(depth.saturating_sub(1) as i32),
+        (None, None) => 0,
+    };
+    if start_height > end_height {
+        return Err(format!(
+            "--start-height {start_height} is above --end-height {end_height}"
+        ));
+    }
+
+    // Walk down from the tip to the requested range. `prev()` only follows the
+    // block index, so skipping ahead of the range costs no block reads.
+    let mut entry = tip;
+    while entry.height() > end_height {
+        entry = entry
+            .prev()
+            .ok_or_else(|| format!("chain ended before reaching height {end_height}"))?;
+    }
+
     eprintln!(
-        "scanning {} block(s) from height {} to tip {} ({})",
-        tip_height.saturating_sub(start_height) + 1,
+        "scanning {} block(s) from height {} to {} ({})",
+        end_height.saturating_sub(start_height) + 1,
         start_height,
-        tip_height,
-        tip.block_hash()
+        end_height,
+        entry.block_hash()
     );
 
-    let mut entry = tip;
     loop {
         let height = entry.height();
         if height < start_height {
