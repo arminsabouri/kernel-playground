@@ -1,1 +1,8 @@
 /target
+*.parquet
+scan_*.log
+analysis_*.txt
+schema.json
+__pycache__/
+.ipynb_checkpoints/
+explore/.venv/

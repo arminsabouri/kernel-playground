@@ -1,0 +1,1 @@
+MVP notebook and CLI for summarizing `kernel-playground` feature Parquet matrices (overview, txs/block, fingerprint prevalence). Install and run with `uv sync` then `uv run explore-features`, or open `explore_features.ipynb` via `uv run jupyter notebook explore_features.ipynb`.
