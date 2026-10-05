@@ -588,12 +588,14 @@ fn analyze_block(
     let block_ctxs = build_cpfp_context(&txs);
 
     // Analysis is pure over owned data, so it fans out across the block's txs.
-    // `collect` into an indexed Vec keeps rows in block order.
+    // `collect` keeps rows in block order. Coinbase txs are built by pool
+    // software rather than a wallet, so they are not part of the output.
     let rows: Vec<Result<NormalizedTx, String>> = txs
         .par_iter()
         .zip(prevouts.par_iter())
         .zip(block_ctxs.par_iter())
         .enumerate()
+        .filter(|(_, ((tx, _), _))| !tx.is_coinbase())
         .map(|(tx_index, ((tx, prevouts), block_ctx))| {
             match analyze_tx(tx, prevouts, height, &block_hash, block_ctx) {
                 Ok(analysis) => Ok(normalize_tx(&analysis)),

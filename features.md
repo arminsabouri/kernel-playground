@@ -1,6 +1,7 @@
 # Features
 
 Every column written to the Parquet feature matrix, one row per transaction.
+Coinbase transactions are skipped during the scan and have no rows.
 The column order is pinned by `src/analysis/schema_columns.txt` (checked by the
 `schema_matches_golden` test); `cargo run -- schema` prints the same list.
 
@@ -122,12 +123,12 @@ From rawtx-rs multisig info on inputs (`h_has_multisig` covers presence).
 
 | Column | Encoding | Description |
 | ------ | -------- | ----------- |
-| `fee_rate_round` | bool | Fee is a whole number of sat/vB: fee > 0 and fee % vsize == 0, with vsize = ceil(weight / 4). Always 0 for coinbase |
+| `fee_rate_round` | bool | Fee is a whole number of sat/vB: fee > 0 and fee % vsize == 0, with vsize = ceil(weight / 4) |
 
 ## `change_*` — change detection
 
-Source: `src/analysis/change.rs`. Coinbase transactions and transactions with
-≤1 payment output get no candidates.
+Source: `src/analysis/change.rs`. Transactions with ≤1 payment output get no
+candidates.
 
 | Column(s) | Encoding | Description |
 | --------- | -------- | ----------- |
