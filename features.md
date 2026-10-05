@@ -54,6 +54,7 @@ Source: `src/analysis/fingerprints.rs`. Transaction-level values come from
 | `fp_any_low_r_grinding` | bool | |
 | `fp_any_taproot_annex` | bool | Any taproot (key- or script-path) input whose witness carries a BIP341 annex (last item starts with `0x50`) |
 | `fp_schnorr_sighash_form__{default,explicit_all,explicit_other}` | multi-hot | Wire encoding of Schnorr signatures on taproot inputs: `default` = 64-byte sig (implicit `SIGHASH_DEFAULT`), `explicit_all` = 65-byte sig with trailing `0x01`, `explicit_other` = 65-byte sig with any other trailing flag. Key path reads witness item 0; script path reads every stack item before the script and control block. |
+| `fp_sequence_shape__{final,locktime_no_rbf,rbf,relative_blocks,relative_time,other}` | multi-hot | Per-input `nSequence`: `final` = `0xffffffff`; `locktime_no_rbf` = `0xfffffffe`; `rbf` = `0xfffffffd`; otherwise bit 31 set → `other`; bit 22 set → `relative_time` (BIP68, 512 s units); else `relative_blocks` (BIP68) (computed in `heuristics.rs`) |
 
 ## `h_*` — heuristics
 
@@ -64,7 +65,6 @@ outputs except OP_RETURN.
 | --------- | -------- | ----------- |
 | `h_cpfp__{none,parent,child,both}` | one-hot | Same-block spend relation: `parent` = a later tx in the block spends one of its outputs; `child` = it spends an output created earlier in the block; `both` = both |
 | `h_sighash__{DEFAULT,ALL,NONE,SINGLE,ALL\|ANYONECANPAY,NONE\|ANYONECANPAY,SINGLE\|ANYONECANPAY,UNKNOWN}` | multi-hot | Sighash flag of every input signature (rawtx-rs). 64-byte Schnorr sigs are mapped to `DEFAULT`; any flag outside the listed values is `UNKNOWN` |
-| `h_sequence_shape__{final,locktime_no_rbf,rbf,relative_blocks,relative_time,other}` | multi-hot | Per-input `nSequence`: `final` = `0xffffffff`; `locktime_no_rbf` = `0xfffffffe`; `rbf` = `0xfffffffd`; otherwise bit 31 set → `other`; bit 22 set → `relative_time` (BIP68, 512 s units); else `relative_blocks` (BIP68) |
 | `h_locktime_shape__{none,height_exact,height_delta_1,height_delta_2_9,height_delta_10_99,height_delta_100_plus,height_future,timestamp}` | one-hot | `nLockTime` relative to the confirming height *h*: `none` = 0; `timestamp` = ≥ 500,000,000; `height_future` = locktime > *h*; otherwise binned by *h* − locktime: 0, 1, 2–9, 10–99, ≥100 |
 | `h_has_uncompressed_pubkey` | bool | Any input or output reveals an uncompressed ECDSA pubkey (tx-indexer `input_with_prevout::has_uncompressed_pubkey`, or rawtx-rs pubkey stats) |
 | `h_uih1` | bool | Gibson UIH1 (eprint 2022/589): smallest payment output < smallest input |
