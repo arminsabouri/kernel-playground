@@ -22,9 +22,6 @@ fp_any_taproot_annex
 fp_schnorr_sighash_form__default
 fp_schnorr_sighash_form__explicit_all
 fp_schnorr_sighash_form__explicit_other
-h_equal_amount_outputs
-h_likely_coinjoin
-h_likely_consolidation
 h_cpfp__none
 h_cpfp__parent
 h_cpfp__child
@@ -52,7 +49,6 @@ h_locktime_shape__height_delta_100_plus
 h_locktime_shape__height_future
 h_locktime_shape__timestamp
 h_has_uncompressed_pubkey
-h_has_multisig
 h_uih1
 h_uih2
 prevout_type__p2pk

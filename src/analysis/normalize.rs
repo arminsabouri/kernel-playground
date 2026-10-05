@@ -184,16 +184,12 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
     );
     b.push_multi_hot("fp_schnorr_sighash_form", &schnorr_forms);
 
-    b.push_bool("h_equal_amount_outputs", h.equal_amount_outputs);
-    b.push_bool("h_likely_coinjoin", h.likely_coinjoin);
-    b.push_bool("h_likely_consolidation", h.likely_consolidation);
     b.push_one_hot("h_cpfp", h.cpfp);
     b.push_multi_hot("h_sighash", &h.sighashes);
     let sequence_shapes = unique_by(h.sequence_shapes.iter().copied(), |x| x as u8);
     b.push_multi_hot("h_sequence_shape", &sequence_shapes);
     b.push_one_hot("h_locktime_shape", h.locktime_shape);
     b.push_bool("h_has_uncompressed_pubkey", h.has_uncompressed_pubkey);
-    b.push_bool("h_has_multisig", h.has_multisig);
     b.push_bool("h_uih1", h.uih1);
     b.push_bool("h_uih2", h.uih2);
 

@@ -62,15 +62,11 @@ outputs except OP_RETURN.
 
 | Column(s) | Encoding | Description |
 | --------- | -------- | ----------- |
-| `h_equal_amount_outputs` | bool | ≥2 payment outputs share the exact same value |
-| `h_likely_coinjoin` | bool | `h_equal_amount_outputs`, or the rawtx-rs equal-output check: ≥2 inputs and ≥2 outputs, the most common output value appears in ≥⅓ of outputs and more than twice |
-| `h_likely_consolidation` | bool | (≥3 inputs and ≤2 payment outputs) or (≥10 inputs and ≤2 outputs) |
 | `h_cpfp__{none,parent,child,both}` | one-hot | Same-block spend relation: `parent` = a later tx in the block spends one of its outputs; `child` = it spends an output created earlier in the block; `both` = both |
 | `h_sighash__{DEFAULT,ALL,NONE,SINGLE,ALL\|ANYONECANPAY,NONE\|ANYONECANPAY,SINGLE\|ANYONECANPAY,UNKNOWN}` | multi-hot | Sighash flag of every input signature (rawtx-rs). 64-byte Schnorr sigs are mapped to `DEFAULT`; any flag outside the listed values is `UNKNOWN` |
 | `h_sequence_shape__{final,locktime_no_rbf,rbf,relative_blocks,relative_time,other}` | multi-hot | Per-input `nSequence`: `final` = `0xffffffff`; `locktime_no_rbf` = `0xfffffffe`; `rbf` = `0xfffffffd`; otherwise bit 31 set → `other`; bit 22 set → `relative_time` (BIP68, 512 s units); else `relative_blocks` (BIP68) |
 | `h_locktime_shape__{none,height_exact,height_delta_1,height_delta_2_9,height_delta_10_99,height_delta_100_plus,height_future,timestamp}` | one-hot | `nLockTime` relative to the confirming height *h*: `none` = 0; `timestamp` = ≥ 500,000,000; `height_future` = locktime > *h*; otherwise binned by *h* − locktime: 0, 1, 2–9, 10–99, ≥100 |
 | `h_has_uncompressed_pubkey` | bool | Any input or output reveals an uncompressed ECDSA pubkey (tx-indexer `input_with_prevout::has_uncompressed_pubkey`, or rawtx-rs pubkey stats) |
-| `h_has_multisig` | bool | Any input has rawtx-rs multisig info, or an input type of `p2ms` / `p2ms_lax_der` |
 | `h_uih1` | bool | Gibson UIH1 (eprint 2022/589): smallest payment output < smallest input |
 | `h_uih2` | bool | Gibson UIH2: largest input > largest payment output |
 
@@ -111,7 +107,7 @@ Per-signature values from rawtx-rs, over every signature on every input.
 
 ## Multisig
 
-From rawtx-rs multisig info on inputs (`h_has_multisig` covers presence).
+From rawtx-rs multisig info on inputs.
 
 | Column | Type | Description |
 | ------ | ---- | ----------- |
@@ -126,8 +122,8 @@ From rawtx-rs multisig info on inputs (`h_has_multisig` covers presence).
 
 ## `change_*` — change detection
 
-Source: `src/analysis/change.rs`. Transactions with ≤1 payment output get no
-candidates.
+Source: `src/analysis/change.rs`. "Payment outputs" means all outputs except
+OP_RETURN. Transactions with ≤1 payment output get no candidates.
 
 | Column(s) | Encoding | Description |
 | --------- | -------- | ----------- |

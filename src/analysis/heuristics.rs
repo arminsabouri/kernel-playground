@@ -1,23 +1,15 @@
 //! Extra heuristics not fully covered by the fingerprint / rawtx crates.
 
-use std::collections::HashMap;
-
-use bitcoin::{Amount, Transaction, TxOut};
+use bitcoin::{Transaction, TxOut};
 use serde::{Deserialize, Serialize};
 
 use super::fingerprints::FingerprintFeatures;
 use super::rawtx::{MultisigInfo, RawTxFeatures};
-use super::types::{CpfpRole, LocktimeShape, PubkeyAlgo, RawInputType, SequenceShape, SighashType};
+use super::types::{CpfpRole, LocktimeShape, PubkeyAlgo, SequenceShape, SighashType};
 use super::BlockTxContext;
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct HeuristicFeatures {
-    /// Dumb equal-amount check: ≥2 non-OP_RETURN outputs share the exact same value.
-    pub equal_amount_outputs: bool,
-    /// Likely coinjoin: equal-amount outputs *or* ≥⅓ of all outputs share a value (count > 2).
-    pub likely_coinjoin: bool,
-    /// Many inputs (≥3) into 1 or 2 non-OP_RETURN outputs, or ≥10 inputs and ≤2 outputs.
-    pub likely_consolidation: bool,
     pub cpfp: CpfpRole,
     /// Distinct sighash types seen across all input signatures.
     pub sighashes: Vec<SighashType>,
@@ -29,7 +21,6 @@ pub struct HeuristicFeatures {
     pub has_uncompressed_pubkey: bool,
     /// Distinct multisig configurations observed on inputs.
     pub multisig_configs: Vec<MultisigInfo>,
-    pub has_multisig: bool,
     /// Gibson UIH1: some payment-like output is smaller than every input.
     pub uih1: bool,
     /// Gibson UIH2: some input is larger than every output (unnecessary-looking input).
@@ -51,11 +42,6 @@ pub fn extract(
         .iter()
         .filter(|o| !o.script_pubkey.is_op_return())
         .collect();
-
-    let equal_amount_outputs = has_equal_amount_outputs(&payment_outputs);
-    let likely_coinjoin = equal_amount_outputs || potentially_coinjoin(tx);
-    let likely_consolidation = (tx.input.len() >= 3 && payment_outputs.len() <= 2)
-        || (tx.input.len() >= 10 && tx.output.len() <= 2);
 
     let cpfp = match (
         block_ctx.has_same_block_child,
@@ -104,26 +90,16 @@ pub fn extract(
     multisig_configs.sort_by_key(|m| (m.m, m.n, m.unknown_n));
     multisig_configs.dedup();
 
-    let has_multisig = !multisig_configs.is_empty()
-        || rawtx
-            .inputs
-            .iter()
-            .any(|i| matches!(i.input_type, RawInputType::P2ms | RawInputType::P2msLaxDer));
-
     let (uih1, uih2) = uih_flags(prevouts, &payment_outputs);
     let fee_rate_round = fee_rate_round(tx, prevouts);
 
     HeuristicFeatures {
-        equal_amount_outputs,
-        likely_coinjoin,
-        likely_consolidation,
         cpfp,
         sighashes,
         sequence_shapes,
         locktime_shape,
         has_uncompressed_pubkey,
         multisig_configs,
-        has_multisig,
         uih1,
         uih2,
         fee_rate_round,
@@ -141,29 +117,6 @@ fn fee_rate_round(tx: &Transaction, prevouts: &[TxOut]) -> bool {
         Some(fee) => fee > 0 && vsize > 0 && fee % vsize == 0,
         None => false,
     }
-}
-
-fn has_equal_amount_outputs(outputs: &[&bitcoin::TxOut]) -> bool {
-    if outputs.len() < 2 {
-        return false;
-    }
-    let mut amounts: Vec<Amount> = outputs.iter().map(|o| o.value).collect();
-    amounts.sort();
-    amounts.windows(2).any(|w| w[0] == w[1])
-}
-
-/// rawtx-rs equal-output coinjoin heuristic: ≥2 ins/outs, ≥⅓ of outputs share a
-/// value, and that shared value appears more than twice.
-fn potentially_coinjoin(tx: &Transaction) -> bool {
-    if tx.input.len() < 2 || tx.output.len() < 2 {
-        return false;
-    }
-    let mut counts: HashMap<Amount, usize> = HashMap::new();
-    for output in &tx.output {
-        *counts.entry(output.value).or_insert(0) += 1;
-    }
-    let max_count = counts.values().copied().max().unwrap_or(0);
-    max_count >= tx.output.len() / 3 && max_count > 2
 }
 
 /// Gibson UIH1 / UIH2 (see eprint 2022/589).
