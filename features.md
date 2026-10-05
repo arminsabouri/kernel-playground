@@ -54,7 +54,7 @@ Source: `src/analysis/fingerprints.rs`. Transaction-level values come from
 | `fp_any_low_r_grinding` | bool | |
 | `fp_any_taproot_annex` | bool | Any taproot (key- or script-path) input whose witness carries a BIP341 annex (last item starts with `0x50`) |
 | `fp_schnorr_sighash_form__{default,explicit_all,explicit_other}` | multi-hot | Wire encoding of Schnorr signatures on taproot inputs: `default` = 64-byte sig (implicit `SIGHASH_DEFAULT`), `explicit_all` = 65-byte sig with trailing `0x01`, `explicit_other` = 65-byte sig with any other trailing flag. Key path reads witness item 0; script path reads every stack item before the script and control block. |
-| `fp_sequence_shape__{final,locktime_no_rbf,rbf,relative_blocks,relative_time,other}` | multi-hot | Per-input `nSequence`: `final` = `0xffffffff`; `locktime_no_rbf` = `0xfffffffe`; `rbf` = `0xfffffffd`; otherwise bit 31 set → `other`; bit 22 set → `relative_time` (BIP68, 512 s units); else `relative_blocks` (BIP68) (computed in `heuristics.rs`) |
+| `fp_sequence_shape__{final,locktime_no_rbf,rbf,relative_blocks,relative_time,relative_disabled,other}` | multi-hot | Per-input `nSequence`: `final` = `0xffffffff`; `locktime_no_rbf` = `0xfffffffe`; `rbf` = `0xfffffffd`; otherwise bit 31 set with no bits outside the BIP68 type flag (bit 22) and 16-bit value → `relative_disabled` (e.g. `0x80000000`, `0x80000001`); any other value with bit 31 set → `other`; bit 22 set → `relative_time` (BIP68, 512 s units); else `relative_blocks` (BIP68) (computed in `heuristics.rs`) |
 
 ## `h_*` — heuristics
 
@@ -119,6 +119,7 @@ From rawtx-rs multisig info on inputs.
 | Column | Encoding | Description |
 | ------ | -------- | ----------- |
 | `fee_rate_round` | bool | Fee is a whole number of sat/vB: fee > 0 and fee % vsize == 0, with vsize = ceil(weight / 4) |
+| `fee_rate_below_1` | bool | Fee rate under 1 sat/vB: fee < vsize (zero-fee included). False when prevouts are unavailable |
 
 ## `change_*` — change detection
 

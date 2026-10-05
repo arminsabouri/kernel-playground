@@ -221,6 +221,7 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
     b.push_multi_hot("change_position", &change_positions);
 
     b.push_bool("fee_rate_round", h.fee_rate_round);
+    b.push_bool("fee_rate_below_1", h.fee_rate_below_1);
 
     // Low-S is an ECDSA rule; rawtx-rs also reports it for Schnorr sigs.
     b.push_bool(

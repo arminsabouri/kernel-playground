@@ -634,18 +634,27 @@ pub enum SequenceShape {
     RelativeTime = 4,
     /// Any other nSequence (unusual RBF-capable values, etc.).
     Other = 5,
+    /// Disable flag set, and no bits outside the BIP68 type flag and 16-bit value
+    /// (e.g. `0x80000000`, `0x80000001`): a relative locktime switched off.
+    RelativeDisabled = 6,
 }
 
 
 impl SequenceShape {
     const DISABLE_FLAG: u32 = 1 << 31;
     const TYPE_FLAG: u32 = 1 << 22;
+    const VALUE_MASK: u32 = 0xffff;
 
     pub fn from_nsequence(n: u32) -> Self {
         match n {
             0xffff_ffff => Self::Final,
             0xffff_fffe => Self::LocktimeNoRbf,
             0xffff_fffd => Self::Rbf,
+            n if n & Self::DISABLE_FLAG != 0
+                && n & !(Self::DISABLE_FLAG | Self::TYPE_FLAG | Self::VALUE_MASK) == 0 =>
+            {
+                Self::RelativeDisabled
+            }
             n if n & Self::DISABLE_FLAG != 0 => Self::Other,
             n if n & Self::TYPE_FLAG != 0 => Self::RelativeTime,
             _ => Self::RelativeBlocks,
@@ -662,6 +671,7 @@ impl fmt::Display for SequenceShape {
             Self::RelativeBlocks => "relative_blocks",
             Self::RelativeTime => "relative_time",
             Self::Other => "other",
+            Self::RelativeDisabled => "relative_disabled",
         })
     }
 }
@@ -887,6 +897,7 @@ impl Categorical for SequenceShape {
             Self::Rbf,
             Self::RelativeBlocks,
             Self::RelativeTime,
+            Self::RelativeDisabled,
             Self::Other,
         ]
     }
@@ -904,5 +915,30 @@ impl Categorical for LocktimeShape {
             Self::HeightFuture,
             Self::Timestamp,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SequenceShape::{self, *};
+
+    #[test]
+    fn sequence_shape_classification() {
+        let cases = [
+            (0xffff_ffff, Final),
+            (0xffff_fffe, LocktimeNoRbf),
+            (0xffff_fffd, Rbf),
+            (0x8000_0000, RelativeDisabled),
+            (0x8000_0001, RelativeDisabled),
+            (0x8040_ffff, RelativeDisabled),
+            (0xffff_fffc, Other),
+            (0xdead_beef, Other),
+            (0x8001_0000, Other),
+            (0x0000_0090, RelativeBlocks),
+            (0x0040_0001, RelativeTime),
+        ];
+        for (n, want) in cases {
+            assert_eq!(SequenceShape::from_nsequence(n), want, "{n:#010x}");
+        }
     }
 }

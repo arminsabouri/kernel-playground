@@ -27,6 +27,8 @@ pub struct HeuristicFeatures {
     pub uih2: bool,
     /// Fee is a whole number of sat/vB: `fee % vsize == 0` with a non-zero fee.
     pub fee_rate_round: bool,
+    /// Fee rate under 1 sat/vB (`fee < vsize`), below the historical default relay floor.
+    pub fee_rate_below_1: bool,
 }
 
 pub fn extract(
@@ -91,7 +93,10 @@ pub fn extract(
     multisig_configs.dedup();
 
     let (uih1, uih2) = uih_flags(prevouts, &payment_outputs);
-    let fee_rate_round = fee_rate_round(tx, prevouts);
+    let vsize = tx.vsize() as u64;
+    let fee = fee(tx, prevouts);
+    let fee_rate_round = fee.is_some_and(|f| f > 0 && vsize > 0 && f % vsize == 0);
+    let fee_rate_below_1 = fee.is_some_and(|f| f < vsize);
 
     HeuristicFeatures {
         cpfp,
@@ -103,20 +108,18 @@ pub fn extract(
         uih1,
         uih2,
         fee_rate_round,
+        fee_rate_below_1,
     }
 }
 
-fn fee_rate_round(tx: &Transaction, prevouts: &[TxOut]) -> bool {
+/// `None` when prevouts are missing or outputs exceed inputs.
+fn fee(tx: &Transaction, prevouts: &[TxOut]) -> Option<u64> {
     if prevouts.is_empty() {
-        return false;
+        return None;
     }
     let input_sum: u64 = prevouts.iter().map(|p| p.value.to_sat()).sum();
     let output_sum: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
-    let vsize = tx.vsize() as u64;
-    match input_sum.checked_sub(output_sum) {
-        Some(fee) => fee > 0 && vsize > 0 && fee % vsize == 0,
-        None => false,
-    }
+    input_sum.checked_sub(output_sum)
 }
 
 /// Gibson UIH1 / UIH2 (see eprint 2022/589).

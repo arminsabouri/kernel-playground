@@ -39,6 +39,7 @@ fp_sequence_shape__locktime_no_rbf
 fp_sequence_shape__rbf
 fp_sequence_shape__relative_blocks
 fp_sequence_shape__relative_time
+fp_sequence_shape__relative_disabled
 fp_sequence_shape__other
 h_locktime_shape__none
 h_locktime_shape__height_exact
@@ -119,6 +120,7 @@ change_position__first
 change_position__middle
 change_position__last
 fee_rate_round
+fee_rate_below_1
 sig_any_high_s
 der_encoding__not_applicable
 der_encoding__valid
