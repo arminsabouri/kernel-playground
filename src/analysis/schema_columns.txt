@@ -125,3 +125,4 @@ change_position__first
 change_position__middle
 change_position__last
 fee_rate_round
+sig_any_high_s

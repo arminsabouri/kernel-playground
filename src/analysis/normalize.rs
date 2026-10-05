@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use super::TxAnalysis;
-use super::types::Categorical;
+use super::types::{Categorical, SigAlgo};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedTx {
@@ -222,6 +222,15 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
     b.push_multi_hot("change_position", &change_positions);
 
     b.push_bool("fee_rate_round", h.fee_rate_round);
+
+    // Low-S is an ECDSA rule; rawtx-rs also reports it for Schnorr sigs.
+    b.push_bool(
+        "sig_any_high_s",
+        raw.inputs
+            .iter()
+            .flat_map(|i| i.signatures.iter())
+            .any(|s| s.signature_type == SigAlgo::Ecdsa && !s.low_s),
+    );
 }
 
 fn unique_by<T: Copy + Eq>(items: impl IntoIterator<Item = T>, key: impl Fn(T) -> u8) -> Vec<T> {

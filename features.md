@@ -99,6 +99,14 @@ OP_RETURN flavors flattened into their own variants:
 | ------ | -------- | ----------- |
 | `reveals_inscription` | bool | |
 
+## Signatures
+
+Per-signature values from rawtx-rs, over every signature on every input.
+
+| Column(s) | Encoding | Description |
+| --------- | -------- | ----------- |
+| `sig_any_high_s` | bool | Any ECDSA signature whose S is above half the curve order. Schnorr signatures are not checked |
+
 ## Fee
 
 | Column | Encoding | Description |
