@@ -545,6 +545,38 @@ impl fmt::Display for ChangeHeuristic {
     }
 }
 
+/// Where a change candidate sits among the payment (non-OP_RETURN) outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum ChangePosition {
+    First = 0,
+    Middle = 1,
+    Last = 2,
+}
+
+impl ChangePosition {
+    /// `index` is the position within the payment outputs, `len` their count (≥2).
+    pub fn from_index(index: usize, len: usize) -> Self {
+        if index == 0 {
+            Self::First
+        } else if index + 1 == len {
+            Self::Last
+        } else {
+            Self::Middle
+        }
+    }
+}
+
+impl fmt::Display for ChangePosition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::First => "first",
+            Self::Middle => "middle",
+            Self::Last => "last",
+        })
+    }
+}
+
 /// BIP68 / BIP125 shape of an input's nSequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
@@ -755,7 +787,17 @@ impl Categorical for CpfpRole {
 
 impl Categorical for ChangeHeuristic {
     fn all() -> &'static [Self] {
-        &[Self::AddressReuse, Self::OptimalChange, Self::ScriptTypeMatch]
+        &[
+            Self::AddressReuse,
+            Self::OptimalChange,
+            Self::ScriptTypeMatch,
+        ]
+    }
+}
+
+impl Categorical for ChangePosition {
+    fn all() -> &'static [Self] {
+        &[Self::First, Self::Middle, Self::Last]
     }
 }
 

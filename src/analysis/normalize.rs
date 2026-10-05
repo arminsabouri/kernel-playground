@@ -218,6 +218,8 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
         |x| x as u8,
     );
     b.push_multi_hot("change_heuristic", &change_heuristics);
+    let change_positions = unique_by(change.candidates.iter().map(|c| c.position), |x| x as u8);
+    b.push_multi_hot("change_position", &change_positions);
 }
 
 fn unique_by<T: Copy + Eq>(items: impl IntoIterator<Item = T>, key: impl Fn(T) -> u8) -> Vec<T> {

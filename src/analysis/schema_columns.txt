@@ -121,3 +121,6 @@ change_no_change_apparent
 change_heuristic__address_reuse
 change_heuristic__optimal_change
 change_heuristic__script_type_match
+change_position__first
+change_position__middle
+change_position__last

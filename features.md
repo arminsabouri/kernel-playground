@@ -110,6 +110,7 @@ Source: `src/analysis/change.rs`. Coinbase transactions and transactions with
 | `change_heuristic__address_reuse` | multi-hot | `fp_address_reuse` is set and a payment output's script matches a prevout script |
 | `change_heuristic__optimal_change` | multi-hot | The smallest payment output is smaller than the smallest input |
 | `change_heuristic__script_type_match` | multi-hot | All prevouts share one script type and exactly one payment output has that type |
+| `change_position__{first,middle,last}` | multi-hot | Position of each change candidate among the payment outputs: `first` = index 0, `last` = final index, `middle` = anything between |
 
 ## Collected but not in the matrix
 

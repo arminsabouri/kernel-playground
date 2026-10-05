@@ -6,12 +6,14 @@ use bitcoin::{Transaction, TxOut};
 use serde::{Deserialize, Serialize};
 
 use super::fingerprints::FingerprintFeatures;
-use super::types::{ChangeHeuristic, RawOutputType};
+use super::types::{ChangeHeuristic, ChangePosition, RawOutputType};
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChangeCandidate {
     pub vout: usize,
     pub value_sat: u64,
+    /// Position among the payment outputs.
+    pub position: ChangePosition,
     pub heuristics: Vec<ChangeHeuristic>,
 }
 
@@ -92,6 +94,13 @@ pub fn analyze(
         .map(|(vout, heuristics)| ChangeCandidate {
             vout,
             value_sat: tx.output[vout].value.to_sat(),
+            position: ChangePosition::from_index(
+                payment
+                    .iter()
+                    .position(|(i, _)| *i == vout)
+                    .expect("candidate is a payment output"),
+                payment.len(),
+            ),
             heuristics,
         })
         .collect();
