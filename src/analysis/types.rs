@@ -504,6 +504,47 @@ impl fmt::Display for DerEncoding {
     }
 }
 
+/// Signature length in bytes, including the sighash byte when present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum SigLength {
+    L64 = 0,
+    L65 = 1,
+    L70 = 2,
+    L71 = 3,
+    L72 = 4,
+    L73 = 5,
+    Other = 6,
+}
+
+impl SigLength {
+    pub fn from_len(len: usize) -> Self {
+        match len {
+            64 => Self::L64,
+            65 => Self::L65,
+            70 => Self::L70,
+            71 => Self::L71,
+            72 => Self::L72,
+            73 => Self::L73,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl fmt::Display for SigLength {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::L64 => "64",
+            Self::L65 => "65",
+            Self::L70 => "70",
+            Self::L71 => "71",
+            Self::L72 => "72",
+            Self::L73 => "73",
+            Self::Other => "other",
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize_repr, Deserialize_repr, Default)]
 #[repr(u8)]
 pub enum CpfpRole {
@@ -798,6 +839,20 @@ impl Categorical for DerEncoding {
             Self::SLengthIsZero,
             Self::NegativeSValue,
             Self::NullByteAtSValueStart,
+        ]
+    }
+}
+
+impl Categorical for SigLength {
+    fn all() -> &'static [Self] {
+        &[
+            Self::L64,
+            Self::L65,
+            Self::L70,
+            Self::L71,
+            Self::L72,
+            Self::L73,
+            Self::Other,
         ]
     }
 }

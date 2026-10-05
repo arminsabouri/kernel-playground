@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use super::TxAnalysis;
-use super::types::{Categorical, SigAlgo};
+use super::types::{Categorical, SigAlgo, SigLength};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedTx {
@@ -238,6 +238,13 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
         |x| x as u8,
     );
     b.push_multi_hot("der_encoding", &der_encodings);
+    let sig_lengths = unique_by(
+        raw.inputs
+            .iter()
+            .flat_map(|i| i.signatures.iter().map(|s| SigLength::from_len(s.length))),
+        |x| x as u8,
+    );
+    b.push_multi_hot("sig_length", &sig_lengths);
 }
 
 fn unique_by<T: Copy + Eq>(items: impl IntoIterator<Item = T>, key: impl Fn(T) -> u8) -> Vec<T> {

@@ -142,3 +142,10 @@ der_encoding__s_not_integer
 der_encoding__s_length_zero
 der_encoding__negative_s
 der_encoding__null_byte_s
+sig_length__64
+sig_length__65
+sig_length__70
+sig_length__71
+sig_length__72
+sig_length__73
+sig_length__other
