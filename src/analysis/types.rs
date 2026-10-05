@@ -779,6 +779,29 @@ impl Categorical for TaprootSpendPath {
     }
 }
 
+impl Categorical for DerEncoding {
+    fn all() -> &'static [Self] {
+        &[
+            Self::NotApplicable,
+            Self::Valid,
+            Self::SigTooShort,
+            Self::SigTooLong,
+            Self::NoCompoundMarker,
+            Self::InvalidCompoundLengthDescriptor,
+            Self::NoSValueLengthDescriptor,
+            Self::DescribedLengthMismatch,
+            Self::RElementNotAnInteger,
+            Self::RLengthIsZero,
+            Self::NegativeRValue,
+            Self::NullByteAtRValueStart,
+            Self::SElementNotAnInteger,
+            Self::SLengthIsZero,
+            Self::NegativeSValue,
+            Self::NullByteAtSValueStart,
+        ]
+    }
+}
+
 impl Categorical for CpfpRole {
     fn all() -> &'static [Self] {
         &[Self::None, Self::Parent, Self::Child, Self::Both]

@@ -106,6 +106,7 @@ Per-signature values from rawtx-rs, over every signature on every input.
 | Column(s) | Encoding | Description |
 | --------- | -------- | ----------- |
 | `sig_any_high_s` | bool | Any ECDSA signature whose S is above half the curve order. Schnorr signatures are not checked |
+| `der_encoding__{not_applicable,valid,sig_too_short,sig_too_long,no_compound_marker,invalid_compound_length,no_s_length,described_length_mismatch,r_not_integer,r_length_zero,negative_r,null_byte_r,s_not_integer,s_length_zero,negative_s,null_byte_s}` | multi-hot | rawtx-rs strict-DER check of each signature. Schnorr signatures report `not_applicable` |
 
 ## Fee
 

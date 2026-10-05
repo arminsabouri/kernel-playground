@@ -231,6 +231,13 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
             .flat_map(|i| i.signatures.iter())
             .any(|s| s.signature_type == SigAlgo::Ecdsa && !s.low_s),
     );
+    let der_encodings = unique_by(
+        raw.inputs
+            .iter()
+            .flat_map(|i| i.signatures.iter().map(|s| s.der_encoding)),
+        |x| x as u8,
+    );
+    b.push_multi_hot("der_encoding", &der_encodings);
 }
 
 fn unique_by<T: Copy + Eq>(items: impl IntoIterator<Item = T>, key: impl Fn(T) -> u8) -> Vec<T> {
