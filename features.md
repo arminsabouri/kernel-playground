@@ -14,7 +14,7 @@ Encoding happens in `src/analysis/normalize.rs`:
 | single categorical        | one-hot: one column per variant, `<prefix>__<label>`        |
 | set-valued categorical    | multi-hot: one column per variant, set if any input/output/signature has it |
 | `Option<bool>`            | three columns: `__none`, `__false`, `__true`                |
-| `version`                 | raw integer (`Int32`)                                       |
+| `version`, `multisig_m`, `multisig_n` | raw integer (`Int32`)                          |
 
 Per-input values (prevout type, Schnorr sighash form, sequence shape, …) are
 collapsed to the set of distinct values seen in the transaction before
@@ -109,6 +109,15 @@ Per-signature values from rawtx-rs, over every signature on every input.
 | `der_encoding__{not_applicable,valid,sig_too_short,sig_too_long,no_compound_marker,invalid_compound_length,no_s_length,described_length_mismatch,r_not_integer,r_length_zero,negative_r,null_byte_r,s_not_integer,s_length_zero,negative_s,null_byte_s}` | multi-hot | rawtx-rs strict-DER check of each signature. Schnorr signatures report `not_applicable` |
 | `sig_length__{64,65,70,71,72,73,other}` | multi-hot | Length in bytes of each signature, including the sighash byte when present (rawtx-rs `length`). Any length not listed sets `other` |
 
+## Multisig
+
+From rawtx-rs multisig info on inputs (`h_has_multisig` covers presence).
+
+| Column | Type | Description |
+| ------ | ---- | ----------- |
+| `multisig_m` | Int32 | Largest m among multisig inputs; 0 when there are none |
+| `multisig_n` | Int32 | Largest n among multisig inputs; 0 when there are none. Bare P2MS spends are left out, because rawtx-rs reports their n as unknown (`unknown_n`) |
+
 ## Fee
 
 | Column | Encoding | Description |
@@ -131,6 +140,6 @@ Source: `src/analysis/change.rs`. Coinbase transactions and transactions with
 ## Collected but not in the matrix
 
 `TxAnalysis` also records these, which are not encoded into Parquet columns:
-`block_hash`, per-signature details (signature algorithm, DER encoding,
-sighash flag byte, length, low-R, low-S), per-pubkey details, multisig m-of-n
-configurations (`multisig_configs`), and change candidate vouts/values.
+`block_hash`, per-signature algorithm, sighash flag byte and low-R, per-pubkey
+details, the full list of multisig m-of-n configurations (`multisig_configs`;
+only the largest m and n are encoded), and change candidate vouts/values.

@@ -149,3 +149,5 @@ sig_length__71
 sig_length__72
 sig_length__73
 sig_length__other
+multisig_m
+multisig_n

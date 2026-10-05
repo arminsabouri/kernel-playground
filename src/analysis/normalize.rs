@@ -5,6 +5,7 @@
 //! - single categoricals → one-hot over [`Categorical::all`]
 //! - set-valued categoricals → multi-hot over the same vocabulary
 //! - version kept as a raw float (no z-score yet)
+//! - counts such as multisig m / n kept as raw floats; see [`INT_COLUMNS`]
 //!
 //! Only `block_height` and `is_coinbase` ride along as metadata. Per-tx
 //! identifiers (txid, position in block) carry no wallet-fingerprint signal and
@@ -18,6 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use super::TxAnalysis;
 use super::types::{Categorical, SigAlgo, SigLength};
+
+/// Columns that hold integers rather than 0/1 flags. Everything else in the
+/// schema is boolean.
+pub const INT_COLUMNS: &[&str] = &["version", "multisig_m", "multisig_n"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedTx {
@@ -245,6 +250,22 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
         |x| x as u8,
     );
     b.push_multi_hot("sig_length", &sig_lengths);
+
+    // rawtx-rs cannot recover n for bare P2MS spends and reports it as unknown.
+    let configs = &h.multisig_configs;
+    b.push_f64(
+        "multisig_m",
+        configs.iter().map(|m| m.m).max().unwrap_or(0) as f64,
+    );
+    b.push_f64(
+        "multisig_n",
+        configs
+            .iter()
+            .filter(|m| !m.unknown_n)
+            .map(|m| m.n)
+            .max()
+            .unwrap_or(0) as f64,
+    );
 }
 
 fn unique_by<T: Copy + Eq>(items: impl IntoIterator<Item = T>, key: impl Fn(T) -> u8) -> Vec<T> {
@@ -302,6 +323,14 @@ mod tests {
     }
 
     /// A row must line up with the schema it claims to be encoded against.
+    #[test]
+    fn int_columns_are_in_schema() {
+        let cols = &schema_ref().columns;
+        for name in INT_COLUMNS {
+            assert!(cols.iter().any(|c| c == name), "{name} missing from schema");
+        }
+    }
+
     #[test]
     fn row_width_matches_schema() {
         let norm = normalize_tx(&TxAnalysis::default());

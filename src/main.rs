@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use analysis::normalize::NormalizedTx;
+use analysis::normalize::{INT_COLUMNS, NormalizedTx};
 use analysis::{
     analyze_tx, bitcoin_tx_from_bytes, normalize_tx, prevouts_from_kernel_coins, schema,
     schema_ref, BlockTxContext,
@@ -364,23 +364,25 @@ fn write_schema(path: &Path) -> Result<(), String> {
 struct ParquetRows {
     block_height: Vec<i32>,
     is_coinbase: Vec<bool>,
-    version: Vec<i32>,
+    int_names: Vec<String>,
+    int_cols: Vec<Vec<i32>>,
     bool_names: Vec<String>,
     bool_cols: Vec<Vec<bool>>,
 }
 
 impl ParquetRows {
     fn new(columns: &[String]) -> Self {
-        let bool_names: Vec<String> = columns
+        let (int_names, bool_names): (Vec<String>, Vec<String>) = columns
             .iter()
-            .filter(|name| *name != "version")
             .cloned()
-            .collect();
+            .partition(|name| INT_COLUMNS.contains(&name.as_str()));
+        let int_cols = vec![Vec::new(); int_names.len()];
         let bool_cols = vec![Vec::new(); bool_names.len()];
         Self {
             block_height: Vec::new(),
             is_coinbase: Vec::new(),
-            version: Vec::new(),
+            int_names,
+            int_cols,
             bool_names,
             bool_cols,
         }
@@ -397,8 +399,12 @@ impl ParquetRows {
         let mut fields: Vec<(PlSmallStr, DataType)> = vec![
             ("block_height".into(), DataType::Int32),
             ("is_coinbase".into(), DataType::Boolean),
-            ("version".into(), DataType::Int32),
         ];
+        fields.extend(
+            self.int_names
+                .iter()
+                .map(|name| (name.as_str().into(), DataType::Int32)),
+        );
         fields.extend(
             self.bool_names
                 .iter()
@@ -418,10 +424,11 @@ impl ParquetRows {
         self.block_height.push(norm.block_height);
         self.is_coinbase.push(norm.is_coinbase);
 
-        let mut bool_i = 0;
+        let (mut int_i, mut bool_i) = (0, 0);
         for (name, value) in columns.iter().zip(norm.x.iter()) {
-            if name == "version" {
-                self.version.push(*value as i32);
+            if INT_COLUMNS.contains(&name.as_str()) {
+                self.int_cols[int_i].push(*value as i32);
+                int_i += 1;
             } else {
                 self.bool_cols[bool_i].push(*value != 0.0);
                 bool_i += 1;
@@ -437,8 +444,10 @@ impl ParquetRows {
         let mut cols: Vec<Column> = vec![
             Series::new("block_height".into(), std::mem::take(&mut self.block_height)).into(),
             Series::new("is_coinbase".into(), std::mem::take(&mut self.is_coinbase)).into(),
-            Series::new("version".into(), std::mem::take(&mut self.version)).into(),
         ];
+        for (name, values) in self.int_names.iter().zip(self.int_cols.iter_mut()) {
+            cols.push(Series::new(name.as_str().into(), std::mem::take(values)).into());
+        }
         for (name, values) in self.bool_names.iter().zip(self.bool_cols.iter_mut()) {
             cols.push(Series::new(name.as_str().into(), std::mem::take(values)).into());
         }
