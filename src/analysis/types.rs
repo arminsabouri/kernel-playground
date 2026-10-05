@@ -740,6 +740,8 @@ impl Categorical for OutputStructure {
     }
 }
 
+/// Coinbase and CoinbaseWitness are left out: the scan skips coinbase txs, so
+/// those columns would always be zero.
 impl Categorical for RawInputType {
     fn all() -> &'static [Self] {
         &[
@@ -757,8 +759,6 @@ impl Categorical for RawInputType {
             Self::P2trkp,
             Self::P2trsp,
             Self::P2a,
-            Self::Coinbase,
-            Self::CoinbaseWitness,
             Self::Unknown,
         ]
     }

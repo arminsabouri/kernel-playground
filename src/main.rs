@@ -363,7 +363,6 @@ fn write_schema(path: &Path) -> Result<(), String> {
 /// Column-major staging buffer for one Parquet row group.
 struct ParquetRows {
     block_height: Vec<i32>,
-    is_coinbase: Vec<bool>,
     int_names: Vec<String>,
     int_cols: Vec<Vec<i32>>,
     bool_names: Vec<String>,
@@ -380,7 +379,6 @@ impl ParquetRows {
         let bool_cols = vec![Vec::new(); bool_names.len()];
         Self {
             block_height: Vec::new(),
-            is_coinbase: Vec::new(),
             int_names,
             int_cols,
             bool_names,
@@ -396,10 +394,8 @@ impl ParquetRows {
     ///
     /// Declared up front so every row group in the file shares one schema.
     fn polars_schema(&self) -> Schema {
-        let mut fields: Vec<(PlSmallStr, DataType)> = vec![
-            ("block_height".into(), DataType::Int32),
-            ("is_coinbase".into(), DataType::Boolean),
-        ];
+        let mut fields: Vec<(PlSmallStr, DataType)> =
+            vec![("block_height".into(), DataType::Int32)];
         fields.extend(
             self.int_names
                 .iter()
@@ -422,7 +418,6 @@ impl ParquetRows {
             ));
         }
         self.block_height.push(norm.block_height);
-        self.is_coinbase.push(norm.is_coinbase);
 
         let (mut int_i, mut bool_i) = (0, 0);
         for (name, value) in columns.iter().zip(norm.x.iter()) {
@@ -443,7 +438,6 @@ impl ParquetRows {
     fn take_frame(&mut self) -> Result<DataFrame, String> {
         let mut cols: Vec<Column> = vec![
             Series::new("block_height".into(), std::mem::take(&mut self.block_height)).into(),
-            Series::new("is_coinbase".into(), std::mem::take(&mut self.is_coinbase)).into(),
         ];
         for (name, values) in self.int_names.iter().zip(self.int_cols.iter_mut()) {
             cols.push(Series::new(name.as_str().into(), std::mem::take(values)).into());
@@ -688,7 +682,6 @@ mod tests {
             .collect();
         NormalizedTx {
             block_height: i as i32,
-            is_coinbase: i == 0,
             x,
         }
     }
@@ -742,6 +735,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let df = write_rows(&dir.join("empty.parquet"), 0, 16);
         assert_eq!(df.shape().0, 0);
-        assert_eq!(df.width(), schema_ref().columns.len() + 2);
+        assert_eq!(df.width(), schema_ref().columns.len() + 1);
     }
 }

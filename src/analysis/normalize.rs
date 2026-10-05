@@ -7,7 +7,7 @@
 //! - version kept as a raw float (no z-score yet)
 //! - counts such as multisig m / n kept as raw floats; see [`INT_COLUMNS`]
 //!
-//! Only `block_height` and `is_coinbase` ride along as metadata. Per-tx
+//! Only `block_height` rides along as metadata. Per-tx
 //! identifiers (txid, position in block) carry no wallet-fingerprint signal and
 //! nothing downstream joins on them, so they are not stored.
 //! Aggregates that are linear functions of another block (e.g. "any RBF" vs
@@ -27,7 +27,6 @@ pub const INT_COLUMNS: &[&str] = &["version", "multisig_m", "multisig_n"];
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedTx {
     pub block_height: i32,
-    pub is_coinbase: bool,
     /// Feature values aligned with [`schema`].
     pub x: Vec<f64>,
 }
@@ -141,7 +140,6 @@ pub fn normalize_tx(tx: &TxAnalysis) -> NormalizedTx {
     );
     NormalizedTx {
         block_height: tx.block_height,
-        is_coinbase: tx.is_coinbase,
         x: b.values,
     }
 }

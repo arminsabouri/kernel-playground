@@ -26,7 +26,6 @@ multi-hot encoding, so a column means "at least one input has this".
 | Column         | Type    | Description                     |
 | -------------- | ------- | ------------------------------- |
 | `block_height` | Int32   | Height of the confirming block  |
-| `is_coinbase`  | Boolean | Transaction is the coinbase     |
 
 Per-tx identifiers (txid, position in block) are not stored.
 
@@ -83,7 +82,7 @@ transaction.
 | Column prefix | Source | Variants |
 | ------------- | ------ | -------- |
 | `prevout_type__*` | Output type of each spent prevout | see output type variants below |
-| `input_type__*` | rawtx-rs `InputType` of each input | `p2pk`, `p2pk_lax_der`, `p2pkh`, `p2pkh_lax_der`, `p2sh_p2wpkh`, `p2wpkh`, `p2ms`, `p2ms_lax_der`, `p2sh`, `p2sh_p2wsh`, `p2wsh`, `p2tr_keypath`, `p2tr_scriptpath`, `p2a`, `coinbase`, `coinbase_witness`, `unknown` |
+| `input_type__*` | rawtx-rs `InputType` of each input | `p2pk`, `p2pk_lax_der`, `p2pkh`, `p2pkh_lax_der`, `p2sh_p2wpkh`, `p2wpkh`, `p2ms`, `p2ms_lax_der`, `p2sh`, `p2sh_p2wsh`, `p2wsh`, `p2tr_keypath`, `p2tr_scriptpath`, `p2a`, `unknown` |
 | `output_type__*` | rawtx-rs `OutputType` of each output | see below |
 
 Output type variants (shared by `prevout_type__*` and `output_type__*`), with
