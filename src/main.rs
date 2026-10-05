@@ -671,7 +671,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(j, name)| {
-                if name == "version" {
+                if name == "fp_version" {
                     2.0
                 } else if (i + j).is_multiple_of(3) {
                     1.0

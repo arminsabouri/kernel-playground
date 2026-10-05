@@ -1,4 +1,4 @@
-version
+fp_version
 fp_address_reuse
 fp_mixed_input_types
 fp_nlocktime_optin_without_use

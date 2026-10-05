@@ -15,7 +15,7 @@ Encoding happens in `src/analysis/normalize.rs`:
 | single categorical        | one-hot: one column per variant, `<prefix>__<label>`        |
 | set-valued categorical    | multi-hot: one column per variant, set if any input/output/signature has it |
 | `Option<bool>`            | three columns: `__none`, `__false`, `__true`                |
-| `version`, `multisig_m`, `multisig_n` | raw integer (`Int32`)                          |
+| `fp_version`, `multisig_m`, `multisig_n` | raw integer (`Int32`)                       |
 
 Per-input values (prevout type, Schnorr sighash form, sequence shape, …) are
 collapsed to the set of distinct values seen in the transaction before
@@ -33,7 +33,7 @@ Per-tx identifiers (txid, position in block) are not stored.
 
 | Column    | Type  | Description                        |
 | --------- | ----- | ---------------------------------- |
-| `version` | Int32 | Transaction `nVersion` (rawtx-rs)  |
+| `fp_version` | Int32 | Transaction `nVersion` (rawtx-rs)  |
 
 ## `fp_*` — wallet fingerprints
 

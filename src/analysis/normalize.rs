@@ -4,7 +4,7 @@
 //! - bools → `0.0` / `1.0`
 //! - single categoricals → one-hot over [`Categorical::all`]
 //! - set-valued categoricals → multi-hot over the same vocabulary
-//! - version kept as a raw float (no z-score yet)
+//! - fp_version kept as a raw float (no z-score yet)
 //! - counts such as multisig m / n kept as raw floats; see [`INT_COLUMNS`]
 //!
 //! Only `block_height` rides along as metadata. Per-tx
@@ -22,7 +22,7 @@ use super::types::{Categorical, SigAlgo, SigLength};
 
 /// Columns that hold integers rather than 0/1 flags. Everything else in the
 /// schema is boolean.
-pub const INT_COLUMNS: &[&str] = &["version", "multisig_m", "multisig_n"];
+pub const INT_COLUMNS: &[&str] = &["fp_version", "multisig_m", "multisig_n"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedTx {
@@ -150,7 +150,7 @@ fn encode_into(tx: &TxAnalysis, b: &mut FeatureBuilder) {
     let raw = &tx.rawtx;
     let change = &tx.change;
 
-    b.push_f64("version", raw.version as f64);
+    b.push_f64("fp_version", raw.version as f64);
 
     b.push_bool("fp_address_reuse", fp.address_reuse);
     b.push_bool("fp_mixed_input_types", fp.mixed_input_types);
