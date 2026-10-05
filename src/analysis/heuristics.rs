@@ -34,6 +34,8 @@ pub struct HeuristicFeatures {
     pub uih1: bool,
     /// Gibson UIH2: some input is larger than every output (unnecessary-looking input).
     pub uih2: bool,
+    /// Fee is a whole number of sat/vB: `fee % vsize == 0` with a non-zero fee.
+    pub fee_rate_round: bool,
 }
 
 pub fn extract(
@@ -109,6 +111,7 @@ pub fn extract(
             .any(|i| matches!(i.input_type, RawInputType::P2ms | RawInputType::P2msLaxDer));
 
     let (uih1, uih2) = uih_flags(prevouts, &payment_outputs);
+    let fee_rate_round = fee_rate_round(tx, prevouts);
 
     HeuristicFeatures {
         equal_amount_outputs,
@@ -123,6 +126,20 @@ pub fn extract(
         has_multisig,
         uih1,
         uih2,
+        fee_rate_round,
+    }
+}
+
+fn fee_rate_round(tx: &Transaction, prevouts: &[TxOut]) -> bool {
+    if prevouts.is_empty() {
+        return false;
+    }
+    let input_sum: u64 = prevouts.iter().map(|p| p.value.to_sat()).sum();
+    let output_sum: u64 = tx.output.iter().map(|o| o.value.to_sat()).sum();
+    let vsize = tx.vsize() as u64;
+    match input_sum.checked_sub(output_sum) {
+        Some(fee) => fee > 0 && vsize > 0 && fee % vsize == 0,
+        None => false,
     }
 }
 

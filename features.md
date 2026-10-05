@@ -99,6 +99,12 @@ OP_RETURN flavors flattened into their own variants:
 | ------ | -------- | ----------- |
 | `reveals_inscription` | bool | |
 
+## Fee
+
+| Column | Encoding | Description |
+| ------ | -------- | ----------- |
+| `fee_rate_round` | bool | Fee is a whole number of sat/vB: fee > 0 and fee % vsize == 0, with vsize = ceil(weight / 4). Always 0 for coinbase |
+
 ## `change_*` — change detection
 
 Source: `src/analysis/change.rs`. Coinbase transactions and transactions with

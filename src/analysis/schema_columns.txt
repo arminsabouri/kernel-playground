@@ -124,3 +124,4 @@ change_heuristic__script_type_match
 change_position__first
 change_position__middle
 change_position__last
+fee_rate_round
