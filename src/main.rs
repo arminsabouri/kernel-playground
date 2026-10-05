@@ -180,7 +180,15 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
     };
     let start_height = match (args.start_height, args.depth) {
         (Some(start), _) => start as i32,
-        (None, Some(depth)) => tip_height.saturating_sub(depth.saturating_sub(1) as i32),
+        (None, Some(depth)) => {
+            let chain_len = tip_height as i64 + 1;
+            if depth as i64 > chain_len {
+                return Err(format!(
+                    "--depth {depth} is longer than the chain ({chain_len} blocks)"
+                ));
+            }
+            tip_height - (depth as i32 - 1)
+        }
         (None, None) => 0,
     };
     if start_height > end_height {
